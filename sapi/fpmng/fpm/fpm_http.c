@@ -1433,6 +1433,26 @@ void fpm_http_upstream_write(fpm_http_upstream *up, const char *data, size_t len
  * target pool. Reached only through fpm_http_target_fastcgi_ops below -- issue
  * #340 moved it behind that pointer so #344 can add an HTTP/1.1 one next to it
  * without a second dispatch path. */
+/* Which connect failures mean "this target cannot be reached" -- as opposed to
+ * a busy one (EAGAIN: the unix backlog is full) or this process running out of
+ * descriptors, both of which stay a pool-full condition exactly as before. */
+static int fpm_http_connect_errno_unreachable(int err)
+{
+	switch (err) {
+	case ENOENT:
+	case ECONNREFUSED:
+	case EACCES:
+	case EPERM:
+	case ENOTSOCK:
+	case EADDRNOTAVAIL:
+	case ENETUNREACH:
+	case EHOSTUNREACH:
+		return 1;
+	default:
+		return 0;
+	}
+}
+
 fpm_http_upstream *fpm_http_transport_connect(struct fpm_http_target_s *t)
 {
 	struct fpm_http_gateway_s *gw = t->gw;
@@ -1446,6 +1466,7 @@ fpm_http_upstream *fpm_http_transport_connect(struct fpm_http_target_s *t)
 	up->t = t;
 	up->fd = socket(t->upstream_addr.ss_family, SOCK_STREAM, 0);
 	if (up->fd < 0) {
+		t->connect_errno = fpm_http_connect_errno_unreachable(errno) ? errno : 0;
 		free(up);
 		fpm_http_budget_give_back(t);
 		return NULL;
@@ -1461,6 +1482,7 @@ fpm_http_upstream *fpm_http_transport_connect(struct fpm_http_target_s *t)
 
 	if (connect(up->fd, (struct sockaddr*)&t->upstream_addr, t->upstream_len) != 0) {
 		if (errno != EINPROGRESS) {
+			t->connect_errno = fpm_http_connect_errno_unreachable(errno) ? errno : 0;
 			event_free(up->ev_read);
 			event_free(up->ev_write);
 			close(up->fd);
@@ -1526,6 +1548,16 @@ static void fpm_http_reject_queued(fpm_http_conn *c)
 	fpm_http_conn_free(c);
 }
 
+/* Answers one queued request 502 because the connection to its target could
+ * not even be opened (issue #465); the real reason is the log line, naming the
+ * target's address. Same unlink-first contract as fpm_http_reject_queued(). */
+static void fpm_http_reject_unreachable(fpm_http_conn *c, int err)
+{
+	zlog(ZLOG_WARNING, "[pool %s] http: cannot connect to target '%s' (%s) target=%s",
+		c->gw->pool, c->target->listen_address, strerror(err), c->target->pool);
+	fpm_http_finish(c, 1);
+}
+
 /* http.pool_full_policy = wait (issue #309): this request has been queued for
  * http.pool_full_wait_ms. The bound is on the wait, not on the request -- a
  * request already handed to an upstream has left gw->waiting and had its
@@ -1589,7 +1621,28 @@ static void fpm_http_pump_target(struct fpm_http_target_s *t)
 			}
 		}
 		if (!idle) {
+			t->connect_errno = 0;
 			idle = t->ops->connect(t);
+		}
+		if (!idle && t->connect_errno
+			&& !(gw->wait_policy == FPM_HTTP_POOL_FULL_WAIT && t->nupstreams > 0)) {
+			/* Not a full pool: the connection itself failed (the target's
+			 * socket is gone, refused, not accessible). Waiting would never
+			 * help when nothing is in flight -- no upstream will be released
+			 * to pump the queue again -- so every queued request gets the
+			 * real reason in the log and a 502. With http.pool_full_policy =
+			 * wait and requests still in flight, the queue is left to that
+			 * policy: a release re-pumps it and the wait timers bound it. */
+			int err = t->connect_errno;
+
+			while (!TAILQ_EMPTY(&t->waiting)) {
+				fpm_http_conn *w = TAILQ_FIRST(&t->waiting);
+
+				TAILQ_REMOVE(&t->waiting, w, link);
+				w->queued = 0;
+				fpm_http_reject_unreachable(w, err);
+			}
+			return;
 		}
 		if (!idle) {
 			/* The pool is FULL for this gateway: every upstream connection it
