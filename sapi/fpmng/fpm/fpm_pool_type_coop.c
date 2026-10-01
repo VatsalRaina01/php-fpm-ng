@@ -10,7 +10,6 @@
 #include "fpm.h"
 #include "fpm_pool_type.h"
 #include "fpm_pool_type_coop.h"
-#include "fpm_http.h"
 #include "fpm_pool_async.h"
 #include "fpm_pool_coop.h"
 #include "fpm_pool_coop_statics.h"
@@ -29,14 +28,6 @@ static int fpm_pool_type_coop_fiber_validate(struct fpm_worker_pool_s *wp)
 }
 #endif
 
-#if defined(HAVE_FPMNG_FIBER) || defined(HAVE_FPMNG_ASYNC)
-static int fpm_pool_type_coop_http_concurrent_init(struct fpm_worker_pool_s *wp)
-{
-	/* A multi-request executor can handle multiple connections per worker. */
-	return fpm_http_init_pool_with_capacity(wp, 128);
-}
-#endif
-
 /* Both groups below exist only in a binary built with the corresponding flag
  * (--enable-fpmng-fiber / --enable-fpmng-async, both default "no"). Without
  * the flag the sources are not compiled at all (see build/prepare.sh and
@@ -44,8 +35,8 @@ static int fpm_pool_type_coop_http_concurrent_init(struct fpm_worker_pool_s *wp)
  * #ifdef -- fpm_pool_type_coop_variant() below hands back NULL for them
  * instead. */
 #ifdef HAVE_FPMNG_FIBER
-static const struct fpm_pool_type_s fpm_pool_http_fiber = {
-	.name                         = "http",
+static const struct fpm_pool_type_s fpm_pool_fastcgi_fiber = {
+	.name                         = "fastcgi",
 	/* Issue #295. Experimental, and the tracker is the argument: #79, #80,
 	 * #82, #84 and #85 are open correctness bugs against this executor's
 	 * request isolation, and criterion 3 of the bar in #269 ("no open
@@ -55,20 +46,25 @@ static const struct fpm_pool_type_s fpm_pool_http_fiber = {
 	.requires_listen              = 1,
 	.requires_pm                  = 1,
 	.serves_requests              = 1,
-	.reuses_request_runtime       = 1,
+	.serves_fastcgi               = 1,
 	.listening_socket_nonblocking = 1,
 	.baseline_counter             = "requests",
 	.operator_endpoint            = 1,
 	.rejects                      = fpm_coop_rejects,
 	.validate                     = fpm_pool_type_coop_fiber_validate,
-	.init_main                    = fpm_pool_type_coop_http_concurrent_init,
 	.child_main                   = fpm_pool_fiber_child_main,
+	/* What the gateway sizes its upstream budget towards this pool by, per
+	 * child. The number is the one the first http-fiber POC (e441814) gave
+	 * its gateway, there for the whole pool and overridable through
+	 * FPM_HTTP_MAX_UPSTREAMS; it was never measured, and the child itself
+	 * does not enforce it. */
+	.requests_per_child           = 128,
 };
 #endif /* HAVE_FPMNG_FIBER */
 
 #ifdef HAVE_FPMNG_ASYNC
-static const struct fpm_pool_type_s fpm_pool_http_async = {
-	.name                   = "http",
+static const struct fpm_pool_type_s fpm_pool_fastcgi_async = {
+	.name                   = "fastcgi",
 	/* Issue #295. Experimental, one criterion short of beta in a way that is
 	 * cheap to state: no cell in CI builds --enable-fpmng-async at all (see
 	 * build-matrix.yml and issue #87), so criterion 1 of #269's bar -- tests
@@ -77,26 +73,26 @@ static const struct fpm_pool_type_s fpm_pool_http_async = {
 	.requires_listen        = 1,
 	.requires_pm            = 1,
 	.serves_requests        = 1,
-	.reuses_request_runtime = 1,
+	.serves_fastcgi         = 1,
 	.baseline_counter       = "requests",
 	.operator_endpoint      = 1,
 	.rejects                = fpm_pool_async_rejects,
 	.validate               = fpm_pool_async_validate,
-	.init_main              = fpm_pool_type_coop_http_concurrent_init,
 	.child_main             = fpm_pool_async_child_main,
+	.requests_per_child     = 128,
 };
 #endif /* HAVE_FPMNG_ASYNC */
 
 const struct fpm_pool_type_s *fpm_pool_type_coop_variant(const char *type_name, const char *executor_name)
 {
 #ifdef HAVE_FPMNG_FIBER
-	if (!strcmp(executor_name, "fiber") && !strcmp(type_name, "http")) {
-		return &fpm_pool_http_fiber;
+	if (!strcmp(executor_name, "fiber") && !strcmp(type_name, "fastcgi")) {
+		return &fpm_pool_fastcgi_fiber;
 	}
 #endif
 #ifdef HAVE_FPMNG_ASYNC
-	if (!strcmp(executor_name, "async") && !strcmp(type_name, "http")) {
-		return &fpm_pool_http_async;
+	if (!strcmp(executor_name, "async") && !strcmp(type_name, "fastcgi")) {
+		return &fpm_pool_fastcgi_async;
 	}
 #endif
 	(void) type_name;

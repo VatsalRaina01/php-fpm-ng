@@ -3,7 +3,6 @@ fpm-ng: fiber executor drops a request that suspends outside the scheduler, warn
 --SKIPIF--
 <?php
 include "fpmng-skipif.inc";
-fpmng_skip_if_pool_type_unsupported('http');
 
 $binary = getenv('TEST_PHP_FPM_EXECUTABLE') ?: FPM\Tester::findExecutable();
 exec(escapeshellarg($binary) . ' -i 2>&1', $output, $status);
@@ -117,14 +116,18 @@ $cfg = <<<EOT
 [global]
 error_log = {{FILE:LOG}}
 pid = {{FILE:PID}}
+[gw]
+pool.type = gateway
+listen = {{ADDR[http]}}
+chdir = $docRoot
+http.route[web] = /
 [web]
 listen = {{ADDR}}
 chdir = $docRoot
 pm = static
 pm.max_children = 1
-pool.type = http
+pool.type = fastcgi
 pool.executor = fiber
-http.listen = {{ADDR[http]}}
 catch_workers_output = yes
 php_admin_value[opcache.enable] = 0
 php_admin_value[max_execution_time] = 0

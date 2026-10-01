@@ -8,8 +8,8 @@
  *
  * THE DATA SHAPE DIFFERS between pool types (this is the substance, not a
  * detail) -- branch on fpm_pool_type_s.serves_requests:
- *   - serves_requests = 1 (fcgi, http): idle/active workers and the type's
- *     baseline counter, read from that pool's scoreboard with
+ *   - serves_requests = 1 (fastcgi, http-direct): idle/active workers and the
+ *     type's baseline counter, read from that pool's scoreboard with
  *     fpm_scoreboard_copy() -- a copy, because the renderer runs in the
  *     operator endpoint's process and not in one of the pool's own children.
  *   - serves_requests = 0 (supervisor, cron): state/last_start/exit_code/
@@ -18,6 +18,11 @@
  *     memory (fpm_pool_supervisor.c, fpm_pool_cron.c). This file does not know
  *     the internal structure of those states -- exactly as required by the
  *     contract in docs/NOTES.md 3h.
+ *   - serves_requests = 0 with a baseline_counter and no .status() (gateway,
+ *     issue #388): fpmng_pool_info plus the baseline counter, and no state
+ *     block (row.has_state is false). Since issue #390 the counter comes from
+ *     the type's own shared segment through fpm_pool_type_s.baseline; the
+ *     shared scoreboard is the fallback for a type without that hook.
  *
  * The metric label is the pool name -- cardinality is naturally bounded (the
  * number of pools in the config). No labels with unbounded cardinality (no
@@ -39,6 +44,7 @@
 #include "fpm.h"
 #include "fpm_conf.h"
 #include "fpm_worker_pool.h"
+#include "fpm_children.h"
 #include "fpm_operator_pages.h"
 #include "fpm_operator_http.h"
 #include "fpm_pool_type.h"
@@ -84,6 +90,13 @@ struct fpm_operator_page_row_s {
 
 	/* serves_requests = 0 */
 	struct fpm_pool_status_s st;
+	/* 1 when .st was filled by fpm_pool_type_s.status(). A serves_requests = 0
+	 * type may instead carry a baseline_counter with no state of its own (the
+	 * gateway, issue #388), and then the state block must not be rendered from
+	 * a zeroed struct -- that would read as a measured "running" rather than
+	 * as "this type has no state to report". */
+	int has_state;
+	struct fpm_child_s *children;
 
 	/* fpm_pool_type_s.live_gauges() (issue #333): extra per-pool gauges no
 	 * other field above has room for, additive on top of whichever shape
@@ -129,7 +142,32 @@ static void fpm_operator_page_collect(struct fpm_operator_buf_s *b, fpm_operator
 		fpm_scoreboard_free_copy(copy);
 	} else if (type->status) {
 		type->status(wp, &row.st);
+		row.has_state = 1;
 		row.counter_value = row.st.baseline;
+		if (row.st.heartbeat_by_slot && row.st.heartbeat_slots > 0) {
+			row.children = wp->children;
+		}
+	} else if (type->baseline_counter) {
+		/* Issue #388/#390: the gateway has a baseline counter and no per-pool
+		 * state. Since #390 its own segment holds the number, through the
+		 * .baseline hook; a type without the hook (none today) falls back to
+		 * the shared scoreboard's `requests`, exactly the number a
+		 * serves_requests type reads. It is zero for such a type (no PHP child
+		 * bumps it) and that is the honest value, not a missing page: the row
+		 * still carries fpmng_pool_info and the type's own series (the
+		 * per-target fpmng_gateway_* lines
+		 * fpm_http_render_metrics_prometheus() adds). No state block is
+		 * emitted -- see row.has_state. */
+		if (type->baseline) {
+			row.counter_value = type->baseline(wp);
+		} else {
+			struct fpm_scoreboard_s *copy = wp->scoreboard ? fpm_scoreboard_copy(wp->scoreboard, 0) : NULL;
+
+			row.counter_value = copy ? copy->requests : 0;
+			if (copy) {
+				fpm_scoreboard_free_copy(copy);
+			}
+		}
 	} else {
 		/* A type with no worker counts and no state to report. Nothing has
 		 * this shape since issue #278 removed pool.type = status, which did --
@@ -214,6 +252,13 @@ static void fpm_operator_page_row_prometheus(struct fpm_operator_buf_s *b, const
 	if (row->counter) {
 		fpm_operator_buf_appendf(b, "fpmng_pool_%s_total{pool=\"%s\"} %lu\n",
 			row->counter, row->name, row->counter_value);
+	}
+
+	/* Issue #388: a type with a baseline counter but no .status() (the
+	 * gateway) has no state block to print -- see row.has_state. */
+	if (!row->has_state) {
+		fpm_operator_page_row_prometheus_live(b, row);
+		return;
 	}
 
 	for (i = 0; i < sizeof(states) / sizeof(states[0]); i++) {
@@ -388,6 +433,24 @@ static void fpm_operator_page_row_json(struct fpm_operator_buf_s *b, const struc
 		return;
 	}
 
+	/* Issue #388: a type with a baseline counter and no .status() (the
+	 * gateway) has no state to report. The gate has to come BEFORE any state
+	 * key is written: row.st is a zeroed struct, and enum state 0 is
+	 * FPM_POOL_STATE_RUNNING, so writing it would report a measured "running"
+	 * that nothing measured. Same reasoning as the Prometheus renderer's
+	 * has_state gate. */
+	if (!row->has_state) {
+		fpm_operator_buf_appendf(b,
+			"{\"name\":\"%s\",\"type\":\"%s\",\"serves_requests\":false",
+			row->name, row->type_name);
+		if (row->counter) {
+			fpm_operator_buf_appendf(b, ",\"%s\":%lu", row->counter, row->counter_value);
+		}
+		fpm_operator_page_row_json_live(b, row);
+		fpm_operator_buf_appendf(b, "}");
+		return;
+	}
+
 	fpm_operator_buf_appendf(b,
 		"{\"name\":\"%s\",\"type\":\"%s\",\"serves_requests\":false,"
 		"\"state\":\"%s\",\"last_start\":%ld,\"consecutive_failures\":%u",
@@ -419,6 +482,34 @@ static void fpm_operator_page_row_json(struct fpm_operator_buf_s *b, const struc
 	if (row->st.has_heartbeat) {
 		fpm_operator_buf_appendf(b, ",\"heartbeat_age\":%ld",
 			(long) (now > row->st.last_heartbeat ? now - row->st.last_heartbeat : 0));
+	}
+	if (row->st.heartbeat_by_slot && row->st.heartbeat_slots > 0) {
+		struct fpm_child_s *child;
+		int first = 1;
+
+		fpm_operator_buf_appendf(b, ",\"heartbeat_children\":[");
+		for (child = row->children; child; child = child->next) {
+			time_t last_heartbeat;
+			int slot = child->scoreboard_i;
+
+			if (slot < 0 || (unsigned long) slot >= row->st.heartbeat_slots) {
+				continue;
+			}
+			if (!first) {
+				fpm_operator_buf_appendf(b, ",");
+			}
+			first = 0;
+			last_heartbeat = row->st.heartbeat_by_slot[slot].last_heartbeat;
+			if (last_heartbeat > 0) {
+				fpm_operator_buf_appendf(b, "{\"pid\":%d,\"heartbeat_age\":%ld}",
+					(int) child->pid,
+					(long) (now > last_heartbeat ? now - last_heartbeat : 0));
+			} else {
+				fpm_operator_buf_appendf(b, "{\"pid\":%d,\"heartbeat_age\":null}",
+					(int) child->pid);
+			}
+		}
+		fpm_operator_buf_appendf(b, "]");
 	}
 	fpm_operator_page_row_json_live(b, row);
 	fpm_operator_buf_appendf(b, "}");

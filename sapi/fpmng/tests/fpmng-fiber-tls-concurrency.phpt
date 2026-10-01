@@ -3,7 +3,6 @@ fpm-ng: fiber executor makes outgoing TLS (https://) concurrent, with per-reques
 --SKIPIF--
 <?php
 include "fpmng-skipif.inc";
-fpmng_skip_if_pool_type_unsupported('http');
 
 if (!function_exists('stream_socket_server')) {
     die('skip requires stream transports');
@@ -117,14 +116,18 @@ $cfg = <<<EOT
 [global]
 error_log = {{FILE:LOG}}
 pid = {{FILE:PID}}
+[gw]
+pool.type = gateway
+listen = {{ADDR[http]}}
+chdir = $docRoot
+http.route[web] = /
 [web]
 listen = {{ADDR}}
 chdir = $docRoot
 pm = static
 pm.max_children = 1
-pool.type = http
+pool.type = fastcgi
 pool.executor = fiber
-http.listen = {{ADDR[http]}}
 php_admin_value[opcache.enable] = 0
 php_admin_value[max_execution_time] = 0
 EOT;

@@ -3,13 +3,23 @@ fpm-ng: a failed renewal is loud, leaves the installed certificate serving, and 
 --SKIPIF--
 <?php
 include "fpmng-skipif.inc";
-fpmng_skip_if_pool_type_unsupported('http');
+fpmng_skip_if_pool_type_unsupported('gateway');
 fpmng_skip_if_no_acme();
 if (!extension_loaded('openssl')) {
     die('skip requires the openssl extension');
 }
 if (!function_exists('openssl_csr_new')) {
     die('skip requires an OpenSSL build with CSR support');
+}
+/* The renewer runs INSIDE the pool, and the FPM binary is started with -n:
+ * on a distribution that ships openssl as a shared module (Alpine), only this
+ * CLI has it, loaded through TEST_PHP_ARGS, and the pool child does not --
+ * preflight() then refuses the ACME client inside the pool. Skip rather than
+ * assert on a build whose pool cannot reach a CA. Same probe shape as
+ * fpmng-http-direct-worker-buffered-streams.phpt. */
+exec(PHP_BINARY . ' -n -r ' . escapeshellarg('exit(extension_loaded("openssl") ? 0 : 1);'), $o, $st);
+if ($st !== 0) {
+    die('skip the -n CLI has no openssl (shared ext loaded via ini here), so the pool cannot run the ACME client');
 }
 ?>
 --FILE--
@@ -116,14 +126,18 @@ $cfg = <<<EOT
 [global]
 error_log = {{FILE:LOG}}
 pid = {{FILE:PID}}
+[gw]
+pool.type = gateway
+listen = {{ADDR[http]}}
+chdir = $root
+http.front_controller = /env.php
+http.route[web] = /
 [web]
+pool.type = fastcgi
 listen = {{ADDR}}
 chdir = $root
 pm = static
 pm.max_children = 2
-pool.type = http
-http.listen = {{ADDR[http]}}
-http.front_controller = /env.php
 [acme]
 pool.type = supervisor
 supervisor.script = $root/runner.php

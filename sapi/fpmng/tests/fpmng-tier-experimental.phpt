@@ -3,7 +3,6 @@ fpm-ng: an experimental pool announces its tier as a WARNING at startup (issue #
 --SKIPIF--
 <?php
 include "fpmng-skipif.inc";
-fpmng_skip_if_pool_type_unsupported('http');
 
 $binary = getenv('TEST_PHP_FPM_EXECUTABLE') ?: FPM\Tester::findExecutable();
 exec(escapeshellarg($binary) . ' -i 2>&1', $output, $status);
@@ -43,9 +42,8 @@ listen = {{ADDR}}
 chdir = $root
 pm = static
 pm.max_children = 1
-pool.type = http
+pool.type = fastcgi
 pool.executor = fiber
-http.listen = {{ADDR[http]}}
 php_admin_value[opcache.enable] = 0
 php_admin_value[max_execution_time] = 0
 CFG;
@@ -66,7 +64,7 @@ try {
      * expectLogWarning, not a pattern match on the text: the LEVEL is what is
      * under test here. */
     $tester->expectLogWarning(
-        'pool\.type = http with pool\.executor = fiber is EXPERIMENTAL: .*README\.md',
+        'pool\.type = fastcgi with pool\.executor = fiber is EXPERIMENTAL: .*README\.md',
         'experimental',
         checkAllLogs: true
     );

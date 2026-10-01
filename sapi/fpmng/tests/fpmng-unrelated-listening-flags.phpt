@@ -3,7 +3,6 @@ fpm-ng: a fiber pool does not change an unrelated classic socket
 --SKIPIF--
 <?php
 include "fpmng-skipif.inc";
-fpmng_skip_if_pool_type_unsupported('http');
 
 if (PHP_OS_FAMILY !== 'Linux' || !is_dir('/proc')) {
     die('skip requires Linux /proc socket metadata');
@@ -79,27 +78,16 @@ function assertNonblocking(int $flags, bool $expected, string $label): void
 }
 
 $basePort = (int) (getenv('FPMNG_TASK037_BASE_PORT') ?: 26039);
-/* Two ports for the fiber pool (`listen` and `http.listen` cannot share an
- * address -- the first bind wins), a third for the unrelated classic pool. */
 $fiberAddress = "127.0.0.1:$basePort";
-$fcgiAddress = '127.0.0.1:' . ($basePort + 1);
-$classicAddress = '127.0.0.1:' . ($basePort + 2);
-$dir = __DIR__;
+$classicAddress = '127.0.0.1:' . ($basePort + 1);
 
-/* pool.type = http since issue #379: the retired pool type's fiber cell is
- * gone with the type, and http x fiber is the surviving fiber configuration.
- * The fiber pool's own listener speaks HTTP on http.listen (requests go to a
- * script file, same shape as the fiber-matrix test); the unrelated classic
- * pool below keeps its upstream FastCGI socket. */
 $config = <<<EOT
 [global]
 error_log = {{FILE:LOG}}
 pid = {{FILE:PID}}
 [fiber]
-listen = $fcgiAddress
-http.listen = $fiberAddress
-chdir = $dir
-pool.type = http
+listen = $fiberAddress
+pool.type = fastcgi
 pool.executor = fiber
 php_admin_value[opcache.enable] = 0
 php_admin_value[max_execution_time] = 0
@@ -112,14 +100,10 @@ pm.max_children = 1
 EOT;
 
 $tester = new FPM\Tester($config, '<?php echo "ok";');
-$script = basename($tester->makeSourceFile('unrelated-flags-'));
-$httpCtx = stream_context_create(['http' => ['timeout' => 5, 'ignore_errors' => true]]);
 
 $tester->start();
 $tester->expectLogStartNotices();
-if (@file_get_contents("http://$fiberAddress/$script", false, $httpCtx) !== 'ok') {
-    throw new RuntimeException('fiber pool did not answer over HTTP');
-}
+$tester->request(address: $fiberAddress)->expectBody('ok', skipHeadersCheck: true);
 $tester->request(address: $classicAddress)->expectBody('ok', skipHeadersCheck: true);
 assertNonblocking(masterListenFlags($tester->getPid(), $fiberAddress), true, 'fiber socket');
 assertNonblocking(masterListenFlags($tester->getPid(), $classicAddress), false, 'unrelated classic socket');

@@ -179,10 +179,12 @@ above come from one sitting on one toolchain for that reason.
 
 ## Deliberate limits
 
-- No trusted-proxy handling, gateway ACLs, gateway access log, HTTP/2,
-  WebSocket upgrades, or CONNECT/TRACE. TLS is supported — see below. Static
+- No trusted-proxy handling, gateway ACLs, gateway access log, HTTP/2, or
+  CONNECT/TRACE. WebSocket upgrades are supported on `pool.executor = worker`
+  only — [WebSocket](#websocket-poolexecutor--worker-issue-343); the classic
+  executor keeps refusing them, and TLS is supported — see below. Static
   files are too, opt-in and on the classic executor only — see below as well.
-  The pool-level operator directives (`ping.path`, `pm.status_path`,
+  The pool-level operator directives (`ping.path`, `operator.status_path`,
   `access.log`, `listen.allowed_clients`, `chroot`) are supported as well — see
   [Operating a direct pool](#operating-a-direct-pool).
 - Only `http.front_controller`, `http.max_body`, `http.read_timeout`, the
@@ -424,6 +426,19 @@ close it for `pool.type = supervisor` — see `docs/supervisor.md`.
   has no per-request state isolation, so cutting a worker off mid-flight would
   lose whatever it was holding — exactly the outcome `worker.request_timeout`
   and `worker.max_pending`'s own drains already avoid.
+
+**The stop request is cooperative.** The master signals the worker (SIGQUIT on
+reload); `fpmng_worker_stopping()` / `fpmng_worker_may_exit()` let the booted
+script's event-loop driver notice and drain. They do not preempt PHP code. A
+script that never checks them can keep running until the master escalation:
+reload sends SIGTERM after the global `process_control_timeout`, then SIGKILL
+one second later if necessary. SIGTERM is normally the worker's immediate
+termination action; a script can install a handler, so the final SIGKILL is the
+hard bound. Master termination starts with SIGTERM and escalates to SIGKILL
+after `process_control_timeout`. This is bounded by the existing global policy,
+not by a worker-specific timer; `worker.request_timeout` applies to unanswered
+requests and does not bound the worker script itself. See
+[`shutdown-timeouts.md`](shutdown-timeouts.md#directives-by-pool-type).
 - **Only valid under `pool.executor = worker`,** rejected everywhere else the
   same way `worker.max_pending` is.
 - **Example:**
@@ -595,8 +610,14 @@ returning `false` rather than throwing, or blocking, or growing the queue
 without limit. Unlike `http.stream`'s synchronous high-water write (which
 blocks the whole worker until the client catches up), a refusal here is just a
 signal: the handler decides what to do with it — retry later, drop the
-connection itself, or apply its own flow control. Only valid under
-`pool.executor = worker`; every other pool type and executor of
+connection itself, or apply its own flow control. A successful later non-empty
+chunk clears the refusal. Once the worker is stopping, however,
+`fpmng_worker_may_exit()` no longer waits for a stream whose last chunk is still
+refused: the SAPI takes over and ends it with the normal `0\r\n\r\n` terminator
+during bounded shutdown. That prevents a non-reading client from holding the
+worker until the master's SIGKILL while preserving retryable backpressure
+before retirement. Only valid under `pool.executor = worker`; every other pool
+type and executor of
 `pool.type = http-direct` rejects it, the same way `worker.max_pending` and
 `worker.request_timeout` are rejected outside this executor.
 
@@ -631,13 +652,152 @@ progress when the worker is asked to stop (`pm.max_requests` reached, or
 SIGQUIT/reload) cannot be answered `503`: its status line — and possibly some
 chunks — are already on the wire, and `evhttp_send_error()`'s second status
 line is not an option once that has happened. `fpm_worker_finish_output()`
-instead shuts the connection down without its terminating chunk (mirroring
-classic's `fpm_direct_stream_abort()`), logs how many streams it cut short, and
-still waits for every other queued reply the normal way. A client mid-stream
-therefore sees a truncated chunked message rather than a hung connection or a
-buffered error page it cannot parse as one.
+instead **ends the stream cleanly** (issue #342): the terminating chunk goes on
+the wire, so a client reading a stream — an `EventSource`, for instance — sees
+a complete chunked message and reconnects, honouring `Last-Event-ID`, rather
+than treating the connection as broken. It still waits for the ending chunks to
+reach the wire the normal way, bounded by the same shutdown budget as every
+other queued reply. (Until #342 this path cut streams short with a
+`shutdown()`, mirroring classic's `fpm_direct_stream_abort()`; the clean end
+made that shape unreachable, so it is gone.)
+
+**Server-Sent Events** are the workload this whole section was built for: a
+response that is *deliberately never finished*, one `data:` frame per event.
+On top of the builtins above an SSE endpoint needs only the three semantics
+this file states — a started stream occupies one `worker.max_pending` slot for
+as long as the client reads, is exempt from `worker.request_timeout` once
+`_start()` has run, is ended with a clean terminating chunk when the worker
+retires, and has its dead clients reported by id through
+[`fpmng_worker_closed_requests()`](#server-sent-events-sse-issue-342). A
+runnable example lives in `examples/http-direct-worker-sse/`.
+
+### Server-Sent Events (SSE) (issue #342)
+
+An SSE stream is a chunked response that is deliberately never finished, which
+breaks the assumptions three places in the worker executor were written under
+— all three now have decided, tested semantics:
+
+1. **Timeout.** A stream with `fpmng_worker_respond_start()` already called is
+   **exempt** from `worker.request_timeout` — that directive means "never got
+   its first byte of response", and a stream that sent its last event 30 s ago
+   is healthy, not leaked. It is exemption, not per-chunk re-arming: the
+   directive keeps exactly one meaning, "how long an unanswered request may
+   sit", and a started stream is out of its business. The remaining backstop
+   is `http.read_timeout`, as for every connection.
+2. **Retirement.** When the worker stops, every still-open stream is ended with
+   a clean terminating chunk, not a 503 and not a reset — an `EventSource`
+   reconnects automatically. See the "graceful shutdown" interaction above.
+3. **Client gone.** A client that walks away mid-stream is reported by request
+   id: the notify pipe signals *that* something happened, and
+
+   ```php
+   fpmng_worker_closed_requests(): list<int>
+   ```
+
+   drains *which* ids died, oldest first, emptying the queue — the same drain
+   shape as `fpmng_worker_next_request()`. Without it a fan-out driver learns
+   of a dead client only from `_chunk()` returning `false`, which for a stream
+   emitting an event every 15 s keeps the dead client's subscription alive for
+   up to one heartbeat interval.
+
+Per-stream cost is one `worker.max_pending` slot for the life of the stream: a
+pool whose purpose is holding streams should size `worker.max_pending` to its
+expected subscriber count, and consider `worker.send_buffer_limit` so a slow
+reader cannot queue events without bound. TLS needs nothing special — the SSL
+bufferevent the stream writes through is the same one every chunk of every
+response uses. SSE frames themselves (`event:`, `data:`, `id:`, retry) are
+userland bytes; the transport never parses them.
+
+`examples/http-direct-worker-sse/` is a runnable, dependency-free example: one
+`/events` route with a ping comment every 15 s, `Last-Event-ID` honoured from
+`$_SERVER['HTTP_LAST_EVENT_ID']` (headers arrive CGI-style via
+`fpmng_worker_request_env()`), fan-out of one published message to every open
+stream *on the worker* — cross-worker publish/subscribe is a different problem
+(issue #182) and deliberately not answered here.
+
+## WebSocket (`pool.executor = worker`) (issue #343)
+
+`fpmng_worker_upgrade(int $id, array $responseHeaders): resource|null` turns a
+valid pending request into an ordinary bidirectional PHP stream:
+
+1. Before changing connection ownership, it requires a `GET`, `Upgrade:
+   websocket`, a `Connection` token list containing `Upgrade`, exactly one
+   canonical base64 `Sec-WebSocket-Key` decoding to 16 bytes, and exactly one
+   `Sec-WebSocket-Version: 13`.
+2. A malformed method/upgrade/Connection/key is answered by the transport with
+   `400 Bad Request`. A missing, duplicate or unsupported version is answered
+   with RFC 6455's `426 Upgrade Required` and `Sec-WebSocket-Version: 13` so a
+   client can retry. These protocol refusals reap and account the request and
+   return `null`; callers should continue their accept loop. They do not throw a
+   `ValueError` or leave a pending request to answer.
+3. A valid handshake writes `101 Switching Protocols` to the connection's
+   bufferevent, with `Sec-WebSocket-Accept` computed in C
+   (`base64(sha1(key || GUID))`) and `$responseHeaders` appended after
+   validation — pass `Sec-WebSocket-Protocol` there. Hop-by-hop headers are
+   refused, the same list every response on this executor obeys.
+4. The valid path hijacks the connection away from evhttp (the same three steps
+   libevent 2.2's own `evws_new_session()` performs, reduced to the public 2.1
+   API), wraps the bufferevent — the OpenSSL one on a TLS pool, whole, since
+   the fd carries only ciphertext — in a `php_stream` and returns it. Other
+   programming errors (unknown id, already-answered request, invalid response
+   headers) still throw before the handshake changes state.
+
+The returned resource is a normal stream: `fread()`, `fwrite()`, `fclose()`,
+`feof()` work, and so do the existing primitives with no new API —
+`fpmng_worker_event_create(FPMNG_WORKER_READ|WRITE, $stream, $cb)` for
+readiness, `fpmng_worker_stream_has_buffered()` for the already-buffered case.
+`fclose()` tears the connection down, and the worker's own retirement closes it
+the same way. Queued plaintext drains first. On TLS, the transport then performs
+a nonblocking `SSL_shutdown()` and sends `close_notify` before half-closing the
+socket; a partial nonblocking alert is retried on the same event loop and falls
+back to the existing bounded shutdown if the peer stops making progress (issue
+#458). The `SSL*` remains owned by evhttp and is freed with the connection.
+
+Semantics worth knowing:
+
+- **Readiness is not the raw fd.** The bufferevent drains the descriptor into
+  its input buffer, where an fd watcher cannot see it — so the watcher bound
+  to an upgraded stream is fired by the connection itself when frames arrive
+  or the output buffer drains. It behaves like a plain read watcher; it just
+  is not `select(2)` on the descriptor.
+- **Read until short.** `fread()` returns everything buffered, `''` when
+  there is none — an empty buffer is the normal state between frames, not
+  EOF. `feof()` becomes true only when the peer (or the worker) actually
+  closed. Read until `fread()` comes up short, the same rule every stream on
+  this executor obeys.
+- **Backpressure is #332's contract**: `fwrite()` returns `0` once the
+  connection's queued-but-unwritten output reaches
+  `worker.send_buffer_limit`, and the write watcher wakes the codec when it
+  drains. There is no WebSocket-specific backpressure.
+- **The hijacked connection is not a pending request**: `worker.max_pending`
+  and `worker.request_timeout` do not bound it; it counts towards
+  `pm.max_requests` like any answered request. `http.read_timeout` no longer
+  applies to it either (the bufferevent timeout is cleared at the hijack) —
+  liveness is the codec's ping/pong.
+- **A successful upgrade is the point of no return for HTTP error reporting.**
+  If userland unwinds before the queued 101 or a close frame reaches the wire,
+  the transport gives that output one bounded shutdown flush and then closes
+  the connection. The warning names the request id, method, URI and selected
+  close outcome; the transport does not send a second HTTP status or synthesize
+  a WebSocket close frame after the hijack (issue #461).
+- **Framing is userland.** Masking, fragmentation, ping/pong, close codes are
+  RFC 6455 byte manipulation, done by `amphp/websocket-server`,
+  `ratchet/rfc6455` or a codec of your own (`examples/http-direct-worker-ws/`
+  has a minimal one). On retirement the driver sees `fpmng_worker_stopping()`
+  and sends its `1001 Going Away` before the loop exits — C guarantees only
+  that the fd is closed, not that the protocol was.
+- **The gateway cannot proxy any of this** (#344 answers `Upgrade` with 501):
+  FastCGI has no way to carry a raw bidirectional stream. #68's three
+  impossibility arguments stand for the classic executor and the gateway;
+  what this section lifts is the third one, for the worker executor only —
+  the one that runs PHP next to its own event loop.
+- Because a hijacked connection never finishes its request, a WebSocket
+  server's driver does not exit on `fpmng_worker_may_exit()` alone — the
+  driver keeps its own connections until it has closed them (see the
+  example).
 
 ## Connection limits (`http.max_connections`)
+
 
 Three policies, added by issue #61, all of them **per worker**. A pool with
 `pm.max_children = 4` and `http.max_connections = 64` allows up to 256
@@ -1064,8 +1224,8 @@ http.front_controller = /index.php
 
 ping.path = /ping
 ping.response = pong
-pm.status_path = /status
-pm.status_listen = 127.0.0.1:8080
+operator.status_path = /status
+operator.status_listen = 127.0.0.1:9253
 access.log = /var/log/php-fpm/app.access.log
 access.format = "%R - %u %t \"%m %r%Q%q\" %s %{milli}d %{kilo}M"
 access.suppress_path[] = /ping
@@ -1073,7 +1233,7 @@ listen.allowed_clients = 10.0.0.4,10.0.0.5
 chroot = /srv/jail
 ```
 
-### `ping.path` and `pm.status_path`
+### `ping.path` and `operator.status_path`
 
 **They are on two different sockets.**
 
@@ -1082,8 +1242,8 @@ before any PHP request is started, and does not count against
 `pm.max_requests`. It is a liveness probe for whatever is in front of the pool,
 so that is where it belongs.
 
-`pm.status_path` is answered by the pool's **operator endpoint**, on
-`pm.status_listen` (default `127.0.0.1:8080`) — see
+`operator.status_path` is answered by the pool's **operator endpoint**, on
+`operator.status_listen` (default `127.0.0.1:9253`) — see
 [`docs/operator-endpoint.md`](operator-endpoint.md). It used to be on the pool's
 own listener; issue #275 moved it, unchanged. The page, its fields, its two
 flags and its headers are exactly what they were; what changed is that the
@@ -1097,7 +1257,7 @@ the directive is a literal in the pool file and upstream matches it literally
 too, so `/%73tatus` is not a way past a proxy rule written against the
 documented spelling.
 
-`pm.status_path` answers plain text, or JSON for `?json`, with the same
+`operator.status_path` answers plain text, or JSON for `?json`, with the same
 `Expires`/`Cache-Control` headers upstream's `fpm_status.c` sends. The fields:
 
 | Field | Where it comes from |
@@ -1246,10 +1406,10 @@ Upstream's fastcgi `?full` reports a per-process *request* detail (the URI, the
 method, the duration). That part is still absent: the scoreboard's per-process
 slots describe a FastCGI request, and a direct child's request is not one.
 
-`pm.status_listen` names where the page is served since issue #275. It was
+`operator.status_listen` names where the page is served since issue #275. It was
 rejected before that, when it could only have asked for a second FastCGI socket
 a direct child has nowhere to put. On `pool.executor = worker` the page is not
-served at all, because `pm.status_path` is rejected there for the reason below.
+served at all, because `operator.status_path` is rejected there for the reason below.
 
 The page is rendered by a process that is not one of this pool's children, which
 is why every number on it comes from shared memory: the per-slot counters the
@@ -1348,18 +1508,31 @@ What differs from a fastcgi pool:
 - Responses that never ran PHP — a static file, a ping, a `403` or a `503` —
   are logged too, with the fields that do not apply (`%M`, `%C`, `%f`, `%u`)
   left at zero or `-` rather than carried over from whatever this child served
-  last. Scrapes of `pm.status_path` are not among them: since issue #275 they
+  last. Scrapes of `operator.status_path` are not among them: since issue #275 they
   never reach this pool.
 
 - `access.suppress_path[]` matches the same request path.
 
-Under `pool.executor = worker` all three of `ping.path`, `pm.status_path` and
+Under `pool.executor = worker`, `operator.status_path`/`operator.status` and
 `access.*` are **rejected**, for the same reason `request_terminate_timeout` is:
 that executor calls `fpm_request_accepting(false)` once for the life of the
 child, so there is no per-request stage, duration, CPU or peak memory to
 report. Refusing the directive is better than answering it with placeholders.
+Issue #387 decided the status page **stays refused** here rather than being
+reduced to a second, differently-shaped page — which is exactly what #275
+avoided when it moved http-direct's page unchanged. `operator.metrics_path` is
+the honest view of this executor.
 
-That does not make `pm.metrics_path` (which this executor does not reject)
+`ping.path`/`ping.response` are **supported** since issue #387. Ping needs none
+of that per-request accounting — it is a literal path match in the connection
+handler — and this executor has a request listener and serves requests, so
+refusing it was the one place `docs/gateway.md`'s first rule ("ping is answered
+on the request listener, by a process that serves requests there") did not
+hold. It is answered after the saturation `503` and ahead of the userland
+queue, so it touches neither the scoreboard's per-request accounting nor
+`worker.max_pending`.
+
+That does not make `operator.metrics_path` (which this executor does not reject)
 untruthful. Since issue #333 its `requests` total is a real count, incremented
 once per request this executor actually answers — both through the buffered
 `fpmng_worker_respond()` and through the streaming completion of
@@ -1372,8 +1545,8 @@ this pool's workers currently have registered via
 published synchronously on every change rather than on a tick, and both drop
 back down — pending on every `fpm_worker_reap()` path (answered, timed out by
 `worker.request_timeout`, or the connection going away), watchers on
-`fpmng_worker_event_free()` — so neither one only grows. What `pm.metrics_path`
-still cannot say for this executor is the same thing `pm.status_path` cannot:
+`fpmng_worker_event_free()` — so neither one only grows. What `operator.metrics_path`
+still cannot say for this executor is the same thing `operator.status_path` cannot:
 idle vs. active per request, a request's duration, or its CPU/peak memory —
 the scoreboard's `idle`/`active` pair for a worker pool therefore keeps reading
 `idle=N, active=0` regardless of how many requests are actually in flight,
@@ -1770,7 +1943,8 @@ that could simply be relaxed.
 Reaching a truly arbitrary method would mean either patching libevent itself
 or bypassing its HTTP request-line parser entirely for a raw
 `bufferevent`-level implementation. This project patches php-src for its own
-worker/fiber transport needs (`patches/0001`–`0008`) but has never carried a
+worker/fiber transport needs (`patches/0001`–`0005`; 0006 was removed by issue
+#420 and 0007/0008 live on branch async) but has never carried a
 libevent patch, and vendoring or patching a system HTTP parsing library is a
 materially larger commitment (a new patch surface to track across
 distributions' own libevent updates, plus request-line parsing security

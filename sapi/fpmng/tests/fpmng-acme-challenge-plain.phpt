@@ -3,7 +3,7 @@ fpm-ng: the plain :80 companion answers the HTTP-01 challenge instead of redirec
 --SKIPIF--
 <?php
 include "fpmng-skipif.inc";
-fpmng_skip_if_pool_type_unsupported('http');
+fpmng_skip_if_pool_type_unsupported('gateway');
 fpmng_skip_if_no_acme();
 if (!function_exists('openssl_x509_parse')) {
     die('skip requires the openssl extension');
@@ -14,15 +14,19 @@ if (trim((string) shell_exec('command -v openssl 2>/dev/null')) === '') {
 $probe = new FPM\Tester(<<<'EOT'
 [global]
 error_log = {{FILE:LOG}}
+[gw]
+pool.type = gateway
+listen = {{ADDR[http]}}
+chdir = /tmp
+http.tls_cert = /nonexistent-cert.pem
+http.tls_key = /nonexistent-key.pem
+http.route[unconfined] = /
 [unconfined]
+pool.type = fastcgi
 listen = {{ADDR}}
 pm = static
 pm.max_children = 1
-pool.type = http
 chdir = /tmp
-http.listen = {{ADDR[http]}}
-http.tls_cert = /nonexistent-cert.pem
-http.tls_key = /nonexistent-key.pem
 EOT, '<?php');
 $messages = $probe->testConfig(true, null, false, false);
 FPM\Tester::clean();
@@ -35,6 +39,7 @@ foreach ((array) $messages as $message) {
 --FILE--
 <?php
 require_once "tester.inc";
+require_once "fpmng-operator.inc";
 
 /* http.plain_listen is the redirect-only companion of a TLS pool (task 042),
  * and it is the socket a CA actually connects to: HTTP-01 is plain HTTP by
@@ -108,18 +113,23 @@ $cfg = <<<EOT
 [global]
 error_log = {{FILE:LOG}}
 pid = {{FILE:PID}}
-[web]
-listen = {{ADDR}}
+[gw]
+pool.type = gateway
+listen = {{ADDR[https]}}
 chdir = $root
-pm = static
-pm.max_children = 1
-pool.type = http
-http.listen = {{ADDR[https]}}
 http.plain_listen = {{ADDR[plain]}}
 http.gateways = 2
 http.front_controller = /index.php
 http.tls_cert = $root/tls.crt
 http.tls_key = $root/tls.key
+http.route[web] = /
+operator.metrics_listen = {{ADDR[operator]}}
+[web]
+pool.type = fastcgi
+listen = {{ADDR}}
+chdir = $root
+pm = static
+pm.max_children = 1
 [publisher]
 pool.type = supervisor
 supervisor.script = $root/publisher.php
@@ -130,6 +140,7 @@ $tester = new FPM\Tester($cfg, $frontController);
 $tester->start();
 $tester->expectLogStartNotices();
 $plain = $tester->getAddr('ipv4', '[plain]');
+$operator = $tester->getListen('{{ADDR[operator]}}');
 
 $deadline = microtime(true) + 10;
 while (microtime(true) < $deadline && !file_exists("$root/publisher.state")) {
@@ -168,6 +179,37 @@ check($status === 200, "challenge with a query string: $status");
 check($status === 200 && $body === KEYAUTH, "percent-encoded prefix: $status " . var_export($body, true));
 echo "prefix-decoding: ok\n";
 
+/* Issue #390 review: the plain companion used to bypass all of the gateway's
+ * own accounting. In NO_CERT it is the only listener serving, so an uncounted
+ * redirect/ACME path reported baseline 0 while answering the CA and broke the
+ * rule that the baseline equals the sum of the target rows. The five plain
+ * requests above are all local answers, so both the baseline and target="-"
+ * are 5, the routed target stays 0, and the per-process connections_open sum
+ * is back to 0 because every request used Connection: close. */
+function metricOf(string $metrics, string $re): ?int
+{
+    return preg_match($re, $metrics, $m) ? (int) $m[1] : null;
+}
+$metrics = '';
+$total = $local = $routed = $open = null;
+$deadline = microtime(true) + 10;
+do {
+    $metrics = fpmng_operator_body($operator, '/metrics');
+    $total = metricOf($metrics, '/fpmng_pool_requests_total\{pool="gw"\} (\d+)/');
+    $local = metricOf($metrics, '/fpmng_gateway_requests_total\{pool="gw",target="-"\} (\d+)/');
+    $routed = metricOf($metrics, '/fpmng_gateway_requests_total\{pool="gw",target="web"\} (\d+)/');
+    $open = metricOf($metrics, '/fpmng_gateway_connections_open\{pool="gw"\} (\d+)/');
+    if ($open === 0) {
+        break;
+    }
+    usleep(100000);
+} while (microtime(true) < $deadline);
+check($total === 5 && $local === 5 && $routed === 0 && $open === 0,
+    'plain-listener accounting: baseline=' . var_export($total, true) .
+    ' local=' . var_export($local, true) . ' routed=' . var_export($routed, true) .
+    ' open=' . var_export($open, true) . "\n$metrics");
+echo "plain-requests-counted: ok\n";
+
 touch("$root/stop");
 $tester->terminate();
 $tester->expectLogTerminatingNotices();
@@ -195,6 +237,7 @@ still-redirects: ok
 challenge-answered-not-redirected: ok
 unknown-token-404: ok
 prefix-decoding: ok
+plain-requests-counted: ok
 Done
 --CLEAN--
 <?php

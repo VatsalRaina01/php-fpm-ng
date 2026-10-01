@@ -66,11 +66,18 @@ esac
 RELEASE=${FPMNG_RELEASE:-$(git -C "$REPO" rev-parse --short HEAD 2>/dev/null || echo unknown)}
 command -v docker >/dev/null || fail "docker is not available; this script drives containers"
 
-# The expected score, per distribution. 32 of the 77 owned tests skip on either
-# of them for the same reason: their pool type needs patches/0006 inside Zend/,
-# which a distribution libphp does not carry, so they ask the binary and skip
-# (issue #230) instead of failing. That number is a property of this build path
-# and is the same everywhere.
+# The expected score, per distribution. Issue #388 moved these constants; see
+# the derivation next to EXPECT_TOTAL below for exactly why and by how much.
+# The historical sentence was: 47 of the 136 owned tests skip on the default
+# (non-TLS) deb package and 49 on the default apk package -- six http.route[]
+# HTTP-transport tests plus the rest of the pool.type = http suite, which a
+# distribution libphp did not support (issue #214, issue #230's mechanism), and
+# the two Alpine-only session skips. With http retired none of that library
+# guard fires any more, so 15 (deb) and 17 (apk) skips are what remain on the
+# default packages. One of them is not a pool-type skip at all:
+# fpmng-http-route-http-direct-fail.phpt needs posix_kill(), and neither
+# distribution's CLI has ext/posix under the -n the suite runs it with -- see
+# the v0.10.0 rehearsal note next to EXPECT_TOTAL below.
 #
 # It moved from 31 of 72 with the per-pool operator endpoint (issue #274), which
 # added four tests: three exercise cron, supervisor and http-direct pools and run
@@ -156,8 +163,11 @@ command -v docker >/dev/null || fail "docker is not available; this script drive
 # package: it reads the two lines the binary prints about its own build flags.
 # So both flavours gain exactly four passes and lose exactly four skips.
 # The rest of the ACME and TLS suite still skips here and for an older reason
-# than the build flags: it needs pool.type = http, which needs patches/0006
-# inside Zend/ (issue #230).
+# than the build flags: on the pre-#388 suite it needed pool.type = http (issue
+# #230), a type a distribution libphp refused because its children wanted
+# patches/0006 inside Zend/. Issue #388 retired that name (the tests are gateway
+# pools now) and issue #420 removed patches/0006 and the guard with it, so the
+# only reason left is the TLS/ACME probe itself -- see the #388 block below.
 #
 # fpmng-http-direct-user-ini.phpt (issue #60) is the test added since the
 # count above was measured: it needs neither TLS nor ACME, so it passes on
@@ -189,9 +199,9 @@ command -v docker >/dev/null || fail "docker is not available; this script drive
 # counts are unaffected.
 #
 # fpmng-http-direct-connection-info.phpt (issue #62) is a sixth addition: a
-# pool.type = http-direct pool with http.tls_cert configured, which needs no
-# patches/0006 support, so it is not one of the tests that skip for that
-# reason. What it does need is a binary built with --enable-fpmng-tls: its
+# pool.type = http-direct pool with http.tls_cert configured. It never asked
+# for a build capability, and issue #420 removed the only one there was. What
+# it does need is a binary built with --enable-fpmng-tls: its
 # SKIPIF probes that directly and skips naming issue #280 when it is missing.
 # The default packages are built without the flag (FPMNG_TLS=0), so it joins
 # the skips there; the php-fpm-ng-tls packages have it, so it passes there
@@ -363,30 +373,176 @@ command -v docker >/dev/null || fail "docker is not available; this script drive
 # flavour's SKIP count carries a further +3; the four PASS counts are
 # unaffected.
 #
-# Branch async carries the fiber/async executor tests main cut in issue #373
-# (eight fiber-specific tests, the two listening-flags tests, and the
-# experimental-tier announcement test -- the 11 that made main's count 120),
-# so the base count here is main's pre-cut 131, not main's 123.
+# Issue #373 removed 11 tests: the fiber/coop executors moved to branch
+# `async` and everything that existed only to exercise them went with them --
+# eight fiber-specific tests (dropped-request, exceptions, flock,
+# request-isolation, sleep-concurrency, stream-select, tls-concurrency, and
+# the pool-type matrix), the two listening-flags tests that only made sense
+# with a fiber pool in the mix, and the experimental-tier announcement test.
+# Every one of them asked the binary for the fiber build flag in its SKIPIF,
+# and this gate never builds a package with that flag, so all 11 were SKIPs
+# on every flavour. TOTAL loses 11 and each flavour's SKIP count loses 11;
+# the four PASS counts are unaffected. Combined with the twenty-fifth
+# addition above: 131 - 11 = 120.
 #
 # fpmng-http-route-target-access-log.phpt, fpmng-http-route-target-metrics.phpt
-# and fpmng-http-gateway-no-route-unchanged.phpt (issue #341, merged from main)
-# are three further additions: all three use pool.type = http, and this
-# stage's distribution libphp does not support the type (issue #214) -- so all
-# three skip on every flavour regardless of TLS. TOTAL carries +3 (131 + 3 =
-# 134) and each flavour's SKIP count carries +3; the four PASS counts are
-# unaffected. Issue #376 retired fastcgi-ng and moved no counts: no .phpt file
-# was added or removed (the retired-name assertion lives inside the existing
-# fpmng-config-rejected-directives.phpt), and the fiber tests this branch runs
-# now sit on pool.type = http, which skips on libphp for the same reason the
-# old fastcgi-ng cells did.
+# and fpmng-http-gateway-no-route-unchanged.phpt (issue #341) are a
+# twenty-sixth addition, three tests together: all three use pool.type = http,
+# same reasoning as the trio above -- this stage's distribution libphp does
+# not support the type (issue #214) -- so all three skip on every flavour
+# regardless of TLS. TOTAL carries a further +3 and each flavour's SKIP count
+# carries a further +3; the four PASS counts are unaffected. Combined with
+# the twenty-fifth addition and issue #373's removal above: 120 + 3 = 123.
+#
+# Issue #376 removed the second of the two pool types this gate's libphp could
+# not honour, and turned its name into a retired one refused with its own
+# message. It moves none of the counts
+# below: no .phpt file was added or removed (the retired-name assertion lives
+# inside the existing fpmng-config-rejected-directives.phpt, which stays one
+# file with one outcome), and no test skipped on the package for the removed
+# type's support alone -- a retired name cannot be probed as a supported type,
+# so fpmng-pool-type-build-support.phpt and fpmng-pool-type-classic-matrix.phpt
+# keep the file counts they had. The constants are unchanged; this note is the
+# per-test record of that zero delta.
+#
+# Issue #445 is the stale-constants bug this block exists to prevent, found
+# when the v0.8.0/v0.9.0 tags failed this very gate. Thirteen tests had landed
+# since the constants above were touched, none of it a regression. Measured on
+# all four flavour x TLS rows (the poligon, php-8.5.9, 2026-09-19), the delta
+# against the 123-test constants:
+#
+#   six always-PASS (worker executor, no pool.type dependency):
+#     fpmng-http-direct-worker-closed-requests.phpt (#342),
+#     fpmng-http-direct-worker-sse-dead-client-slot.phpt (#444),
+#     fpmng-http-direct-worker-sse-retire.phpt (#342),
+#     fpmng-http-direct-worker-ws.phpt (#343),
+#     fpmng-http-direct-worker-ws-close-idle.phpt (#442),
+#     fpmng-http-direct-worker-ws-orphaned-ops.phpt (#443)
+#   one PASS with TLS, SKIP without (#294's tls package carries it):
+#     fpmng-http-direct-worker-ws-tls.phpt (#343)
+#   six always-SKIP -- http.route[] over the HTTP/1.1 client transport (#344)
+#   and its follow-ups; the package gate's libphp does not support
+#   pool.type = http (issue #214), which every one of them asks for:
+#     fpmng-http-route-http-direct.phpt,
+#     fpmng-http-route-http-direct-fail.phpt,
+#     fpmng-http-route-http-direct-stream.phpt,
+#     fpmng-http-route-header-name.phpt (#453),
+#     fpmng-http-route-xff-peer.phpt (#452),
+#     fpmng-http-route-1xx-interim.phpt (#451)
+#
+# TOTAL 123 + 13 + 4 = 140. Every row: +6 PASS (the always-pass six), +7 SKIP
+# on the non-TLS packages (the six routes plus ws-tls), +6 SKIP with TLS (the
+# six routes). Issue #347 added fpmng-supervisor-restart-never-processes.phpt,
+# issue #456 added fpmng-http-direct-worker-ws-has-buffered-eof.phpt, issue
+# #460 added fpmng-http-direct-worker-ws-eof-wakeups.phpt and issue #387 added
+# fpmng-http-direct-worker-ping.phpt; all four run on every flavour: +4 PASS
+# everywhere. deb: non-TLS 83/40 -> 93/47, TLS 89/34 -> 100/40. apk: non-TLS
+# 81/42 -> 91/49, TLS 86/37 -> 97/43. On the TLS rows EXPECT_PASS is a
+# PASS+WARN sum (issue #301): fpmng-supervisor-jitter.phpt wobbles between a
+# bare pass and a warning (issue #398), and the sum holds either way.
+# Issue #389 added five more tests (fpmng-http-gateway-operator*.phpt): the
+# http.operator forwarding map, its exact-match 404, its own ACL, its startup
+# refusals, and two gateways with different bases. None of them touches TLS or
+# ACME and every type they configure (gateway, http-direct, cron) is supported
+# by a distribution libphp, so they PASS on every flavour: +5 PASS everywhere
+# and no SKIP change. 141 -> 146 total.
+#
+# Issue #390 added three more (fpmng-gateway-counters.phpt,
+# fpmng-gateway-counters-503.phpt, fpmng-gateway-status.phpt): the gateway's own
+# shared-memory counters rendered by the operator child, the per-target 503
+# count, and its JSON status page. None touches TLS or ACME, and the types they
+# configure (gateway, http-direct, fastcgi) are supported by a distribution
+# libphp, so they PASS on every flavour: +3 PASS everywhere and no SKIP change.
+# 146 -> 149 total.
+#
+# The review of #390 added a fourth (fpmng-gateway-counters-respawn-gauge.phpt):
+# a gateway killed with a connection open must not leak its per-process gauges.
+# Same type support and no TLS/ACME, so +1 PASS everywhere and no SKIP change.
+# 149 -> 150 total.
+#
+# The v0.10.0 review added fpmng-http-gateway-listen-acl.phpt (issue #493): a
+# gateway refuses listen.allowed_clients with the replacement named, and
+# http.allowed_clients denies a peer outside its list. Same type support and no
+# TLS/ACME, so +1 PASS everywhere and no SKIP change. 150 -> 151 total.
+#
+# Issue #492 added two more (fpmng-supervisor-restart-never-killed.phpt and
+# fpmng-supervisor-restart-onfailure-killed.phpt): a completed, parked
+# supervisor copy that is SIGKILLed must not be respawned into a second
+# invocation while its sibling is still running. They configure pool.type =
+# supervisor with no TLS/ACME directive, so both PASS on every flavour: +2 PASS
+# everywhere and no SKIP change. 151 -> 153 total.
+#
+# The v0.10.0 release rehearsal (2026-09-22, ubuntu-latest, php-8.5.4) is the
+# first real gate run of the numbers derived since #388, and it moved two
+# things.
+#
+# One is a single test on every flavour: fpmng-http-route-http-direct-fail.phpt
+# (#344) SKIPs instead of PASSing. Its SKIPIF needs posix_kill(), and neither
+# distribution's CLI has ext/posix under the -n the suite runs every test with:
+# Ubuntu ships posix.so but loads it through ini, and Alpine ships no posix
+# module at all (measured in both images). Before #388 the test skipped for the
+# retired http type anyway, so the #388 block above counted it as one of the 33
+# that would start passing; it does not, and the reason is the test rig, not
+# the package. Non-TLS rows: deb 138/15, apk 136/17 (both measured).
+#
+# The other is the TLS rows, which the #388 block derived wrong by more than
+# that one test. It added only 33 of the retired-http tests to them, but on a
+# package built with --enable-fpmng-tls --enable-fpmng-acme all 40 run -- the 7
+# TLS/ACME ones included -- so the derived 146/7 (deb) and 143/10 (apk) carry
+# far too many skips. Measured: deb TLS 152/1 (run 35696982966) and apk TLS
+# 147/6 (run 35701046526 plus issue #500's two in-pool ACME skips). The TLS
+# skips that remain are the posix test above plus, on apk only, the five that
+# need an extension the Alpine -n CLI or its -n FPM pool does not load:
+# fpmng-http-direct-session-status.phpt,
+# fpmng-http-direct-worker-buffered-streams.phpt,
+# fpmng-http-direct-worker-tls-and-client-tls.phpt and -- because the renewer
+# runs inside the pool and the pool child has no openssl either --
+# fpmng-acme-issue.phpt and fpmng-acme-renew-failure.phpt (issue #500).
+# Measured on the v0.11.0 rehearsal (2026-09-29): 166 owned tests, none failing.
+# The three cron tests from #355, #357 and #358 assumed the debug clock, which
+# the shipped binary does not have; they now run at real speed.
 EXPECT_FAIL=0
-EXPECT_TOTAL=134
+#
+# Branch async puts back the 11 fiber/async executor tests main cut in issue
+# #373 (eight fiber-specific ones, the two listening-flags tests and the
+# experimental-tier announcement). Every one asks the binary for the fiber
+# build flag in its SKIPIF and no package is built with it, so all 11 SKIP on
+# every flavour: TOTAL and each SKIP count carry +11 over main's numbers, the
+# PASS counts are main's. 166 + 11 = 177.
+EXPECT_TOTAL=177
+
+# Issue #388 retired pool.type = http and split its proxy half into pool.type =
+# gateway. That changes the classification this whole block exists to pin,
+# because the reason the affected tests skip here is gone: a distribution libphp
+# did not carry patches/0006, which the http type needed, but gateway runs no
+# PHP child at all and needs nothing from the engine -- and neither does any
+# other type any more, so no test skips for a libphp guard. (Issue #420 then
+# removed patches/0006 and the guard outright.) The only test added is
+# fpmng-http-gateway-type.phpt, one more PASS on every flavour.
+#
+# The 40 owned tests that configured pool.type = http split in two:
+#   - 33 use neither TLS nor ACME. On the old binary they skipped for the http
+#     type on every flavour; now they PASS on every flavour.
+#   - 7 are the TLS/ACME ones (acme-challenge-plain/-challenge/-handover/
+#     -issue/-renew-failure and http-tls-alpn-sni/-tls-chain). They still SKIP
+#     on the default (non-TLS) packages for the TLS probe, unchanged, and PASS
+#     on the TLS ones.
+# So every flavour gains 33 PASSes, each non-TLS flavour loses 33 SKIPs, and the
+# new test adds 1 PASS. These numbers are DERIVED from that classification
+# change, rebased onto the current main's pinned counts, and have NOT been
+# re-measured on a package-gate run (no docker available here); a real gate run
+# must confirm them.
+#
+#   deb non-TLS 93/47 + 33 + 1 -> 127/14
+#   deb TLS     100/40 + 33 + 1 -> 134/7
+#   apk non-TLS 91/49 + 33 + 1 -> 125/16
+#   apk TLS     97/43 + 33 + 1 -> 131/10
 
 case "$FLAVOUR" in
 deb)
     IMAGE=ubuntu:26.04
-    if [ "$TLS_PACKAGE" = 1 ]; then EXPECT_PASS=89; EXPECT_SKIP=45
-    else EXPECT_PASS=83; EXPECT_SKIP=51; fi
+    if [ "$TLS_PACKAGE" = 1 ]; then EXPECT_PASS=165; EXPECT_SKIP=12
+    else EXPECT_PASS=151; EXPECT_SKIP=26; fi
     # binutils for objdump and nm (package-deb.sh resolves NEEDED sonames and
     # reads the binary's symbols with them),
     # php8.5-dev for the headers libphp-build.sh compiles against, the embed
@@ -419,8 +575,8 @@ deb)
     ;;
 apk)
     IMAGE=alpine:edge
-    if [ "$TLS_PACKAGE" = 1 ]; then EXPECT_PASS=86; EXPECT_SKIP=48
-    else EXPECT_PASS=81; EXPECT_SKIP=53; fi
+    if [ "$TLS_PACKAGE" = 1 ]; then EXPECT_PASS=160; EXPECT_SKIP=17
+    else EXPECT_PASS=149; EXPECT_SKIP=28; fi
     # openssl-dev only for the TLS package (issue #294). Without it the build
     # stage does not get the headers that would let it link OpenSSL even by
     # accident, which is what a default build being TLS-free (issue #280) is

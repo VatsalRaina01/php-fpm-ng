@@ -7,11 +7,12 @@ State as of 2026-09-06, after hardening from the `fiber-hardening` branch. `pool
 The problems concern the configuration:
 
 ```ini
-pool.type = http
+pool.type = fastcgi
 pool.executor = fiber
 ```
 
-They do not concern the production paths `fastcgi/classic` or `http/classic`. All the code described below lives in `sapi/fpmng/fpm/fpm_pool_coop.c` (the shared "many requests in one process" core), in the pool type's `validate` callback, and in container startup — `fpm_conf.c`, `fpm_children.c` and `fpm_pool_type.h` were not touched, per the extensibility contract.
+They do not concern the production path `fastcgi/classic`, nor a gateway that
+routes to a fiber pool (the gateway itself runs no PHP). All the code described below lives in `sapi/fpmng/fpm/fpm_pool_coop.c` (the shared "many requests in one process" core), in the pool type's `validate` callback, and in container startup — `fpm_conf.c`, `fpm_children.c` and `fpm_pool_type.h` were not touched, per the extensibility contract.
 
 Fiber requires OPcache disabled and `max_execution_time` set to zero:
 

@@ -9,6 +9,12 @@ include "fpmng-skipif.inc";
 
 require_once "tester.inc";
 
+/* Issue #388 retired pool.type = http and pool.type = gateway is a proxy-only
+ * type that needs no patch of ours (it runs no PHP child). Issue #420 removed
+ * patches/0006 and the per-type build-support guard, so every case below is
+ * decided by the type's own reject list and nothing else; there is no
+ * "type unsupported by this binary" refusal left to short-circuit on. */
+
 /* Whether the async executor was compiled in, asked OF THE BINARY, not of the
  * way it was built.
  *
@@ -34,15 +40,6 @@ require_once "tester.inc";
 const FPMNG_ASYNC_DISABLED_BY_POLICY = 'pool.executor = async is disabled';
 const FPMNG_ASYNC_NOT_BUILT = '--enable-fpmng-async';
 
-/* A binary linked against a distribution libphp refuses `pool.type = http`
- * outright, before any directive of that pool is looked at
- * (fpm_pool_type_check_build_support()). The cases below that use
- * `http` are then rejected for that reason instead of the one they name, which
- * is the binary being right, not the test failing -- so that refusal counts as
- * a rejection here. The other ten cases run on both builds, which is the point:
- * this file used to SKIP in its entirety on the libphp path and covered nothing
- * there at all (issue #215). */
-const FPMNG_TYPE_UNSUPPORTED = 'does not carry patches/0006';
 
 function expectConfigFailure(string $label, string $cfg, array $needles): void
 {
@@ -53,10 +50,6 @@ function expectConfigFailure(string $label, string $cfg, array $needles): void
         exit(1);
     }
     $text = implode("\n", $messages);
-    if (str_contains($text, FPMNG_TYPE_UNSUPPORTED)) {
-        echo "$label: rejected\n";
-        return;
-    }
     foreach ($needles as $needle) {
         if (!str_contains($text, $needle)) {
             echo "FAIL: $label missing needle: $needle\n";
@@ -79,11 +72,6 @@ function expectAsyncRejected(string $cfg): void
         exit(1);
     }
     $text = implode("\n", $messages);
-
-    if (str_contains($text, FPMNG_TYPE_UNSUPPORTED)) {
-        echo "async-disabled: rejected\n";
-        return;
-    }
 
     $builtIn = str_contains($text, FPMNG_ASYNC_DISABLED_BY_POLICY);
     $needles = $builtIn
@@ -122,9 +110,9 @@ expectConfigFailure(
 );
 
 expectConfigFailure(
-    'http-fiber-directive-on-classic',
-    $base . "\npool.type = http\nfiber.revalidate_freq = 0",
-    ["'fiber.revalidate_freq' is not supported by pool.type = http"]
+    'fastcgi-fiber-directive-on-classic',
+    $base . "\npool.type = fastcgi\nfiber.revalidate_freq = 0",
+    ["'fiber.revalidate_freq' is not supported by pool.type = fastcgi"]
 );
 
 expectConfigFailure(
@@ -145,17 +133,19 @@ expectConfigFailure(
     ['pool.executor is not supported by pool.type = supervisor']
 );
 
+/* On branch async pool.type = fastcgi carries the fiber/async executors, so
+ * pool.executor itself is accepted there; a name from another type's list is
+ * still unknown on this one. */
 expectConfigFailure(
-    'default-fastcgi-executor',
-    $base . "\npool.executor = classic",
-    ['pool.executor is not supported by pool.type = fastcgi']
+    'fastcgi-unknown-executor',
+    $base . "\npool.executor = worker",
+    ["unknown pool.executor 'worker'; known executors: classic, fiber, async"]
 );
 
 /* issue #376: pool.type = fastcgi-ng was removed. It is a retired name, not an
  * unknown one -- a config file outlives the release that broke it, so the
- * message has to say what happened and where the transport went. The libphp
- * guard below (FPMNG_TYPE_UNSUPPORTED) counts as a rejection on its own, so
- * this case reads the same on both builds. */
+ * message has to say what happened and where the transport went. It reads the
+ * same on every build: issue #420 removed the libphp guard entirely. */
 expectConfigFailure(
     'retired-fastcgi-ng',
     $base . "\npool.type = fastcgi-ng",
@@ -219,12 +209,27 @@ expectConfigFailure(
     ["'worker.max_pending' is not supported by pool.type = http-direct with pool.executor = classic"]
 );
 
+/* Issue #388: the gateway is the type that used to be pool.type = http. It
+ * accepts the http.* namespace (it IS the proxy those directives tune) and
+ * rejects the worker., pm. and php_ families because it runs no PHP. It needs at
+ * least one http.route[] and a target to route to. */
+/* The extra directives have to land in the [gw] section, not after [app]:
+ * appending to the whole config would put them on the target, where most of
+ * them are legal and the refusal being tested would not fire. */
+function gatewayConfig(string $extra = ''): string
+{
+    return "[global]\nerror_log = {{FILE:LOG}}\n"
+        . "[gw]\npool.type = gateway\nlisten = {{ADDR[http]}}\nhttp.route[app] = /\n"
+        . $extra
+        . "[app]\nlisten = {{ADDR}}\npm = static\npm.max_children = 1\n";
+}
+
 /* issue #331. Every other pool.type rejects the whole worker.* namespace too,
  * the same way it already rejects fiber.*. */
 expectConfigFailure(
-    'http-worker-directive-on-classic',
-    $base . "\npool.type = http\nworker.request_timeout = 100",
-    ["'worker.request_timeout' is not supported by pool.type = http"]
+    'gateway-worker-directive-on-classic',
+    gatewayConfig("worker.request_timeout = 100\n"),
+    ["'worker.request_timeout' is not supported by pool.type = gateway"]
 );
 
 /* issue #332. worker.send_buffer_limit bounds fpmng_worker_respond_chunk()'s
@@ -249,9 +254,9 @@ expectConfigFailure(
 );
 
 expectConfigFailure(
-    'http-worker-max-lifetime-directive-on-classic',
-    $base . "\npool.type = http\nworker.max_lifetime = 60",
-    ["'worker.max_lifetime' is not supported by pool.type = http"]
+    'gateway-worker-max-lifetime-directive-on-classic',
+    gatewayConfig("worker.max_lifetime = 60\n"),
+    ["'worker.max_lifetime' is not supported by pool.type = gateway"]
 );
 
 /* issue #338. worker.accept_threshold bounds how much of the kernel's accept
@@ -305,40 +310,118 @@ expectConfigFailure(
 unlink("$workerRoot/worker.php");
 rmdir($workerRoot);
 
+/* Issue #388: pool.type = http is retired, refused by name with the shape that
+ * replaces it. A retired name is a config that used to work, so it earns its
+ * own message rather than "unknown pool.type". */
+expectConfigFailure(
+    'retired-http-type',
+    $base . "\npool.type = http",
+    ["pool.type 'http' no longer exists", 'pool.type = gateway']
+);
+
+/* Issue #388 acceptance criteria: the gateway runs no PHP, so what configures
+ * PHP is refused, each naming the directive. */
+expectConfigFailure(
+    'gateway-pm',
+    gatewayConfig("pm.max_children = 2\n"),
+    ["'pm.max_children' is not supported by pool.type = gateway"]
+);
+expectConfigFailure(
+    'gateway-php-admin-value',
+    gatewayConfig("php_admin_value[memory_limit] = 256M\n"),
+    ["'php_admin_value' is not supported by pool.type = gateway"]
+);
+expectConfigFailure(
+    'gateway-php-value',
+    gatewayConfig("php_value[memory_limit] = 256M\n"),
+    ["'php_value' is not supported by pool.type = gateway"]
+);
+expectConfigFailure(
+    'gateway-environment',
+    gatewayConfig("env[APP_ENV] = production\n"),
+    ["'env' is not supported by pool.type = gateway"]
+);
+/* Worker-output, worker-identity and resource directives are read only by
+ * fpm_unix_init_child()/fpm_php_init_child()/fpm_stdio_init_child() for a PHP
+ * worker, which a gateway never runs; accepted, they would silently do
+ * nothing, so they are refused like the php_* families. */
+expectConfigFailure(
+    'gateway-catch-workers-output',
+    gatewayConfig("catch_workers_output = yes\n"),
+    ["'catch_workers_output' is not supported by pool.type = gateway"]
+);
+expectConfigFailure(
+    'gateway-clear-env',
+    gatewayConfig("clear_env = no\n"),
+    ["'clear_env' is not supported by pool.type = gateway"]
+);
+expectConfigFailure(
+    'gateway-chroot',
+    gatewayConfig("chroot = /\n"),
+    ["'chroot' is not supported by pool.type = gateway"]
+);
+
+/* `listen` is the public HTTP(S) port on this type, so http.listen has nothing
+ * left to override. Refused as redundant rather than accepted as a second way
+ * to spell the same socket (fpm_http_validate_pool()). */
+expectConfigFailure(
+    'gateway-http-listen-redundant',
+    gatewayConfig("http.listen = {{ADDR[pub]}}\n"),
+    ['http.listen is redundant on pool.type = gateway']
+);
+
+/* With no implicit own-pool target, a gateway with no http.route[] would
+ * answer 404 to everything; that is a configuration error, not a proxy. */
+expectConfigFailure(
+    'gateway-no-routes',
+    "[global]\nerror_log = {{FILE:LOG}}\n[gw]\npool.type = gateway\nlisten = {{ADDR[http]}}\n",
+    ['pool.type = gateway with no http.route[] serves nothing']
+);
+
 /* pool.executor = async is rejected in both builds, but by two different code
  * paths, so the case has to say which build it is looking at instead of
  * inheriting one (issue #87). Without --enable-fpmng-async the executor entry
  * has no .type and fpm_pool_type_resolve() names the flag that is missing
- * (sapi/fpmng/fpm/fpm_pool_type.c:472); with the flag the resolve succeeds and
+ * (fpm_pool_type_validate_executor() in sapi/fpmng/fpm/fpm_pool_type.c); with the flag the resolve succeeds and
  * fpm_pool_async_validate() rejects the pool as a matter of policy
  * (sapi/fpmng/fpm/fpm_pool_async.c:73). Asserting only the first needle made
  * this case fail in any --enable-fpmng-async build. */
-expectAsyncRejected($base . "\npool.type = http\npool.executor = async\nhttp.listen = {{ADDR[http]}}");
+expectAsyncRejected($base . "\npool.type = fastcgi\npool.executor = async");
 
 ?>
 Done
 --EXPECT--
 fastcgi-http-directive: rejected
-http-fiber-directive-on-classic: rejected
+fastcgi-fiber-directive-on-classic: rejected
 supervisor-listen: rejected
 cron-pm: rejected
 supervisor-executor: rejected
-default-fastcgi-executor: rejected
+fastcgi-unknown-executor: rejected
 retired-fastcgi-ng: rejected
 direct-worker-request-terminate-timeout: rejected
 direct-worker-stream: rejected
 direct-worker-max-execution-time: rejected
 direct-worker-max-pending-zero: rejected
 direct-classic-worker-max-pending: rejected
-http-worker-directive-on-classic: rejected
+gateway-worker-directive-on-classic: rejected
 direct-classic-worker-send-buffer-limit: rejected
 direct-classic-worker-max-memory: rejected
-http-worker-max-lifetime-directive-on-classic: rejected
+gateway-worker-max-lifetime-directive-on-classic: rejected
 direct-classic-worker-accept-threshold: rejected
 direct-worker-missing-script: rejected
 direct-worker-foreign-executor: rejected
 direct-user-ini-filename-separator: rejected
 direct-http-route: rejected
+retired-http-type: rejected
+gateway-pm: rejected
+gateway-php-admin-value: rejected
+gateway-php-value: rejected
+gateway-environment: rejected
+gateway-catch-workers-output: rejected
+gateway-clear-env: rejected
+gateway-chroot: rejected
+gateway-http-listen-redundant: rejected
+gateway-no-routes: rejected
 async-disabled: rejected
 Done
 --CLEAN--

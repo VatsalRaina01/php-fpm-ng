@@ -3,7 +3,6 @@ fpm-ng: fiber executor isolates superglobals, sessions, and ini_set under concur
 --SKIPIF--
 <?php
 include "fpmng-skipif.inc";
-fpmng_skip_if_pool_type_unsupported('http');
 
 if (!extension_loaded('session')) {
     die('skip requires the session extension');
@@ -71,14 +70,18 @@ $cfg = <<<EOT
 [global]
 error_log = {{FILE:LOG}}
 pid = {{FILE:PID}}
+[gw]
+pool.type = gateway
+listen = {{ADDR[http]}}
+chdir = $docRoot
+http.route[web] = /
 [web]
 listen = {{ADDR}}
 chdir = $docRoot
 pm = static
 pm.max_children = 1
-pool.type = http
+pool.type = fastcgi
 pool.executor = fiber
-http.listen = {{ADDR[http]}}
 php_admin_value[opcache.enable] = 0
 php_admin_value[max_execution_time] = 0
 php_admin_value[session.save_path] = $docRoot/sessions

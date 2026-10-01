@@ -245,55 +245,18 @@ static int fpm_child_cloexec(void)
 	return 0;
 }
 
-/* One directive, one page, one socket -- the rule #273 was written to restore.
- * pm.status_path on a type with an operator endpoint names the page that
- * listener serves (fpm_operator_endpoint.c); upstream's in-child handler must
- * therefore not answer the same path on the pool's request listener as well.
- *
- * It otherwise would, and does on main: fpm_status_init_child() copies
- * pm.status_path into fpm_status_uri, and fpm_main.c matches it against
- * SG(request_info).request_uri before the script runs. On pool.type = http that
- * is reachable -- measured on 192.168.8.50 against a running gateway with
- * "http.front_controller =", which is what makes SCRIPT_NAME the request path:
- * GET /gw-status on the PUBLIC listener returned upstream's status page while
- * GET /gw-status on the operator listener returned the new per-pool JSON. Two
- * different pages, one directive, and one of them on the site's public port.
- *
- * Done here, in the child, and not by refusing the directive or by clearing it
- * during configuration: the master's view of the pool stays what the operator
- * wrote (fpm_conf_dump() still prints it), and fork() has already made this
- * copy of the config private, so nothing outside this process sees the change.
- *
- * Every type with an operator endpoint is covered, with no exception: since
- * issue #275 there is no type left that answers the path on its own listener.
- * ping.path is deliberately untouched here on every type -- #273, point 9, left
- * it on the request listener, because it is a liveness probe for whatever sits
- * in front of the pool. pool.type = http is the one exception, and on purpose
- * (issue #382): for that type the thing sitting in front of the pool IS the
- * gateway process, so fpm_http.c answers ping.path itself, in the gateway,
- * before a request ever reaches this child -- there is no "untouched" left to
- * do here. fastcgi keeps #273's original answer (a real web server is in
- * front) and http-direct already answered locally before #382 existed. */
-static void fpm_child_operator_endpoint_owns_status(struct fpm_worker_pool_s *wp)
-{
-	const struct fpm_pool_type_s *type = fpm_pool_type_of(wp);
-
-	if (!type->operator_endpoint) {
-		return;
-	}
-	if (wp->config->pm_status_path) {
-		free(wp->config->pm_status_path);
-		wp->config->pm_status_path = NULL;
-	}
-}
+/* The rule "one directive, one page, one socket" (#273) that used to be
+ * restored here is now enforced at configuration time (issue #386): the types
+ * that answer a page on the operator listener take operator.status_path, and
+ * pm.status_path is refused on them. pm.status_path is left to upstream's
+ * in-child handler on pool.type = fastcgi only, where it never reached this
+ * function (that type has no operator endpoint). Nothing needs clearing before
+ * fpm_status_init_child() reads it. */
 
 static void fpm_child_init(struct fpm_worker_pool_s *wp) /* {{{ */
 {
 	fpm_globals.max_requests = wp->config->pm_max_requests;
 	fpm_globals.listening_socket = dup(wp->listening_socket);
-
-	/* Before fpm_status_init_child() below, which is what reads it. */
-	fpm_child_operator_endpoint_owns_status(wp);
 
 	/* fpm-ng: PHP's own errors have nowhere to go in a pool whose policy runs
 	 * in the child — no response, no front end to hand a FastCGI stderr stream
@@ -667,6 +630,16 @@ int fpm_children_make(struct fpm_worker_pool_s *wp, int in_event_loop, int nb_to
 
 int fpm_children_create_initial(struct fpm_worker_pool_s *wp) /* {{{ */
 {
+	/* Issue #388: a proxy_only type (the gateway) has no PHP workers, but its
+	 * validate() sets pm_max_children = 1 so upstream's scoreboard allocator
+	 * accepts the pool (see fpm_http_validate_pool()). Its processes are
+	 * forked by the type's own init_main() into the fpm_children_extra
+	 * registry, so this pm.*-driven path must stay out of the way. Data on
+	 * the type, not a name here, like every other per-type decision. */
+	if (fpm_pool_type_of(wp)->proxy_only) {
+		return 1;
+	}
+
 	/* Issue #330: adopt any children a selective reload carried over for this
 	 * pool BEFORE the ordinary fork loop below runs, so that loop's own
 	 * running_children < max check (fpm_children_make()) naturally forks only

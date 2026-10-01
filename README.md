@@ -22,15 +22,26 @@ Verified 2026-09-07 against `sapi/fpmng`:
   + OpenSSL, zlib, pdo_mysql, sockets, pcntl, posix
 - runs in a bare `FROM scratch`, php-fpm-ng as PID 1, HTTP 200, whole image
   33,885,546 bytes with the full, unstripped binary
-- the frontend selects `pool.type = fastcgi | http`; no directive means
-  classic `fastcgi` and stays compatible with upstream FPM
-- `http` accepts an optional `pool.executor = classic | fiber | async`
-  (default `classic`); `fastcgi-ng` was retired in 0.9.0 (issue #376) and its
-  name is refused with a dedicated message
-- metrics: `pm.status_path` (JSON) and `pm.metrics_path` (Prometheus) expose
-  one pool on an operator listener named by `pm.status_listen` /
-  `pm.metrics_listen`, one target per pool (`docs/operator-endpoint.md`);
-  application metrics from PHP
+- the frontend selects `pool.type = gateway | fastcgi | http-direct`; no
+  directive means classic `fastcgi` and stays compatible with upstream FPM.
+  `pool.executor` is available on `http-direct`: `classic` is the default, and
+  `worker` is the beta executor used for WebSocket/SSE and other long-lived
+  connections. Issue #388 retired `pool.type = http`: the proxy is `gateway`
+  (its `listen` is the public port, `http.route[]` says what it forwards to) and
+  the PHP workers are an ordinary `fastcgi` pool behind it. FastCGI pools may
+  opt into per-pool operator metrics on the shared HTTP listener while keeping
+  upstream `pm.status_path` on the FastCGI socket (`docs/gateway.md` and
+  `docs/operator-endpoint.md`).
+- on this branch (`async`, issue #373) `pool.type = fastcgi` also accepts
+  `pool.executor = fiber | async`, compiled in only with `--enable-fpmng-fiber`
+  / `--enable-fpmng-async`; behind a gateway such a pool is an ordinary
+  `http.route[]` target
+- metrics: `operator.status_path` (JSON) and `operator.metrics_path`
+  (Prometheus) expose one pool on an operator listener named by
+  `operator.status_listen` / `operator.metrics_listen`, one target per pool
+  (`docs/operator-endpoint.md`); `operator.metrics` / `operator.status` are
+  shorthands for `/metrics/<pool>` / `/status/<pool>`; application metrics from
+  PHP
   (`fpm_metric_register/inc/set/observe`, NOTES 3k/3w) through the
   `ext/fpmng_metrics/` extension, also from CLI via `fpm_metric_render()`
 - the `fiber` executor is experimental and not intended for production, while
@@ -49,18 +60,32 @@ code feels (decided in issue #269).
 | **beta** | may change in a minor release, with a release-note entry | fixed, no response-time commitment | in scope, no response-time commitment | no, but may be redesigned |
 | **experimental** | may change in any release | best effort | best effort, offered as-is | yes, in any release |
 
-Where things stand today:
+Where things stand today (audited against the bar below in issue #380):
 
 | | tier |
 | --- | --- |
-| `pool.type = fastcgi`, `http`, `supervisor`, `cron` | supported |
+| `pool.type = fastcgi`, `gateway`, `supervisor`, `cron` | supported |
 | `pool.type = http-direct` with the default `classic` executor | supported |
-| the operator endpoint (`pm.status_path`, `pm.metrics_path`) | supported |
+| the operator endpoint (`operator.status_path`, `operator.metrics_path`) | supported |
 | `pool.type = http-direct` with `pool.executor = worker` | beta |
 | TLS termination (`--enable-fpmng-tls`, `http.tls_*`) | beta |
 | ACME certificate issuance (`--enable-fpmng-acme`) | beta |
 | `pool.executor = fiber` (`--enable-fpmng-fiber`) | experimental |
 | `pool.executor = async` (`--enable-fpmng-async`) | experimental |
+
+`pool.type = http`, `pool.type = fastcgi-ng` and `pool.type = status` are
+retired names, not tiers: `http` was split into `gateway` plus an ordinary
+`fastcgi` pool and `fastcgi-ng` folded into `fastcgi` (issues #388, #376), and
+`status` became the operator endpoint (issue #278). A configuration that still
+names one is refused with its replacement rather than "unknown pool.type".
+
+The worker executor is the only live beta pool type. The #180-#183 spikes named
+its exit condition -- the absence of a streaming primitive, not concurrency --
+and that was resolved in v0.7.0 (`fpmng_worker_respond_start()/_chunk()/_end()`
+with backpressure, honest metrics, memory recycling, connection info). What is
+still missing is the cross-worker wakeup (issue #191, open), so the long-lived
+fan-out shape has no measurement under a load resembling use yet; that is the
+criterion that keeps it beta, not any open correctness issue.
 
 A pool that is not supported says so in `error_log` once at startup: a `NOTICE`
 for beta, a `WARNING` for experimental, naming the pool and the tier. A
@@ -80,10 +105,11 @@ fourth of those.
 
 There is a `.deb` and an `.apk` that contain no PHP: they depend on the
 distribution's `libphp` (`libphp8.5-embed`, `php85-embed`), so a machine needs
-no compiler and no php-src to run `pool.type = fastcgi` or
-`pool.type = http-direct`. The other pool types need patches that apply inside
-`libphp` and still need a build from source. Commands, the supported matrix and
-what happens on a version mismatch: [`docs/install.md`](docs/install.md).
+no compiler and no php-src to run `pool.type = fastcgi`, `pool.type =
+gateway` or `pool.type = http-direct`. No pool type needs a patch applied
+inside `libphp` any more (issue #388 retired the last one, `pool.type = http`),
+so the packages run everything this tree ships. Commands, the supported matrix
+and what happens on a version mismatch: [`docs/install.md`](docs/install.md).
 
 Each release carries **two** of each (#294): `php-fpm-ng`, which terminates no
 TLS, and `php-fpm-ng-tls`, the same commit built with `--enable-fpmng-tls
@@ -99,8 +125,9 @@ port nobody answers on.
 
 - **`pool.type = status` is gone** (#278). A pool that reported on every other
   pool from a listener of its own is what the operator endpoint (#274) already
-  is. Put `pm.status_path` and `pm.metrics_path` on the pools you want to
-  watch, pointing `pm.status_listen` at the address the status pool used. The
+  is. Put `operator.status_path` and `operator.metrics_path` on the pools you
+  want to watch, pointing `operator.status_listen` at the address the status
+  pool used. The
   scraper keeps its port and gains one target per pool instead of one target
   carrying all of them; the JSON body keeps its `{"pools":[…]}` shape, one
   element long. Worked example:
@@ -111,6 +138,17 @@ port nobody answers on.
   the types with a web server in front of them do not have one. On those, keep
   `pm.status_path` on the pool's own socket and restrict it at that web server,
   which is where access to a path is already decided.
+
+## Upgrading to v0.10.0: the operator directives moved to `operator.*`
+
+Since issue #386 the operator endpoint's directives are `operator.status_path`,
+`operator.metrics_path`, `operator.status_listen` and `operator.metrics_listen`,
+with `operator.status` / `operator.metrics` as shorthands for
+`/status/<pool>` / `/metrics/<pool>`. The old `pm.` spellings are **refused by
+name**, not aliased: an affected configuration does not start. `pm.status_path`
+is the one name that stays, and only on `pool.type = fastcgi`, where it keeps
+its upstream meaning. See
+[`docs/operator-endpoint.md`](docs/operator-endpoint.md).
 
 ## Plan
 
@@ -127,9 +165,10 @@ purpose — the script sets the pace, and a script that returns instead of
 looping now says so in the log. Who decides the interval, and the fast-restart
 warning: [`docs/supervisor.md`](docs/supervisor.md).
 
-A `cron`, `supervisor`, `http` or `http-direct` pool answers `pm.status_path`
-and `pm.metrics_path` on an operator listener of its own rather than on the
-socket carrying its traffic — the directives, the default of `127.0.0.1:8080`,
+A `cron`, `supervisor`, `gateway` or `http-direct` pool answers
+`operator.status_path`
+and `operator.metrics_path` on an operator listener of its own rather than on the
+socket carrying its traffic — the directives, the default of `127.0.0.1:9253`,
 the collision rule and what each page contains are in
 [`docs/operator-endpoint.md`](docs/operator-endpoint.md).
 
@@ -138,11 +177,13 @@ Shutdown grace (`process_control_timeout`, `supervisor.stop_timeout`,
 `docker stop` are documented in
 [`docs/shutdown-timeouts.md`](docs/shutdown-timeouts.md).
 
-One gateway can serve several pools: `http.route[<pool>] = <prefix>[,...]`
-sends a path prefix to another `fastcgi` pool, so an API or a
-stream endpoint gets its own workers and its own saturation behaviour without
-its own listener. The longest-prefix rule, why `/` is an ordinary entry, and
-why the connection budget belongs to a target pool rather than to a prefix:
+A gateway serves several pools: `http.route[<pool>] = <prefix>[,...]` sends a
+path prefix to a `fastcgi` or `http-direct` pool, so an API or a stream
+endpoint gets its own workers and its own saturation behaviour without its own
+listener. Every route is explicit (issue #388): there is no implicit own-pool
+target, a request matching none is a local 404, and at least one route is
+required. The longest-prefix rule and why the connection budget belongs to a
+target pool rather than to a prefix:
 [`docs/http-route.md`](docs/http-route.md).
 
 The HTTP gateway's TLS directives (`http.tls_cert`, `http.tls_reload_check`,
@@ -151,8 +192,8 @@ without a restart, are documented in [`docs/tls.md`](docs/tls.md). TLS
 termination is a build flag -- `./configure --enable-fpmng-tls`, off by
 default and not in the packages (issue #280).
 
-The gateway answers the ACME HTTP-01 challenge itself, on both `http.listen`
-and the plain `http.plain_listen` companion, from state a `cron` or
+The gateway answers the ACME HTTP-01 challenge itself, on both its own
+`listen` and the plain `http.plain_listen` companion, from state a `cron` or
 `supervisor` pool publishes with `fpmng_acme_challenge_set()` — see
 [`docs/acme-challenge.md`](docs/acme-challenge.md). Only one process may
 renew a given certificate, and the result reaches every gateway through the

@@ -43,12 +43,14 @@ $cases = [
      * pool-level listen.allowed_clients is supported since issue #59 and is
      * among the accepted cases below. */
     'gateway-acl' => [$base . "\nhttp.allowed_clients = 127.0.0.1", "'http.allowed_clients' is not supported"],
-    /* issue #59. The classic executor answers ping, status and access.log from
-     * the per-request scoreboard slot it maintains; the worker executor keeps
-     * the same slot untouched for the whole life of the child, so there the
-     * directives are refused rather than answered with placeholders. */
-    'worker-ping' => [$base . "\npool.executor = worker\nping.path = /ping", "'ping.path' is not supported"],
-    'worker-status' => [$base . "\npool.executor = worker\npm.status_path = /status", "'pm.status_path' is not supported"],
+    /* issue #59. The classic executor answers status and access.log from the
+     * per-request scoreboard slot it maintains; the worker executor keeps the
+     * same slot untouched for the whole life of the child, so there those
+     * directives are refused rather than answered with placeholders. ping.path
+     * is NOT refused any more (issue #387): it needs none of that accounting,
+     * it is a literal path match, and it is accepted -- see the accepted case
+     * below. */
+    'worker-status' => [$base . "\npool.executor = worker\noperator.status_path = /status", "'operator.status_path' is not supported"],
     'worker-access-log' => [$base . "\npool.executor = worker\naccess.log = /dev/null", "'access.log' is not supported"],
     'traversal' => [$base . "\nhttp.front_controller = /../secret.php", 'requires an absolute chdir'],
     'unbounded-body' => [$base . "\nhttp.max_body = 0", 'http.max_body between 1 and 32M'],
@@ -90,13 +92,13 @@ foreach ($cases as $label => [$config, $needle]) {
 foreach (['', "\npool.executor = classic", "\nhttp.static = yes", "\nhttp.static = no",
           "\nlisten.allowed_clients = 127.0.0.1",
           "\nping.path = /ping\nping.response = alive",
-          "\npm.status_path = /status",
+          "\noperator.status_path = /status",
           /* Accepted since issue #275: the status page moved onto the operator
            * endpoint, so the directive that names where that endpoint binds has
            * something to name. It was refused before, when it could only have
            * asked for a second FastCGI socket a direct child has nowhere to
            * put. */
-          "\npm.status_path = /status\npm.status_listen = 127.0.0.1:9001",
+          "\noperator.status_path = /status\noperator.status_listen = 127.0.0.1:9001",
           "\naccess.log = /dev/null",
           "\naccess.log = /dev/null\naccess.format = %R %m %r %s\naccess.suppress_path[] = /ping",
           "\nchroot = /"] as $extra) {
@@ -104,6 +106,15 @@ foreach (['', "\npool.executor = classic", "\nhttp.static = yes", "\nhttp.static
     if ($tester->testConfig() !== null) throw new RuntimeException('classic config failed');
 }
 echo "classic: accepted\n";
+/* issue #387: ping.path/ping.response are accepted on the worker executor --
+ * answered after the saturation 503, ahead of the userland queue, and needing
+ * none of the per-request accounting the other #59 directives are refused for. */
+foreach (["\npool.executor = worker\nphp_admin_value[max_execution_time] = 0\nping.path = /ping",
+          "\npool.executor = worker\nphp_admin_value[max_execution_time] = 0\nping.path = /ping\nping.response = alive"] as $extra) {
+    $tester = new FPM\Tester($base . $extra, '<?php');
+    if ($tester->testConfig() !== null) throw new RuntimeException('worker ping config failed');
+}
+echo "worker-ping: accepted\n";
 ?>
 --EXPECT--
 dynamic: rejected
@@ -117,7 +128,6 @@ tls-tuning-without-cert: rejected
 gateway-plain-listen: rejected
 worker-static: rejected
 gateway-acl: rejected
-worker-ping: rejected
 worker-status: rejected
 worker-access-log: rejected
 traversal: rejected
@@ -130,5 +140,6 @@ per-client-above-total: rejected
 per-client-without-total: rejected
 missing-script: rejected
 classic: accepted
+worker-ping: accepted
 --CLEAN--
 <?php require_once "tester.inc"; FPM\Tester::clean(); ?>

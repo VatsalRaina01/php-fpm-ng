@@ -84,10 +84,16 @@ struct fpm_worker_pool_config_s {
 	int pm_max_spawn_rate;
 	int pm_process_idle_timeout;
 	int pm_max_requests;
-	char *pm_status_path;
-	char *pm_status_listen;
-	char *pm_metrics_path;		/* fpm-ng: Prometheus text on the operator endpoint; see fpm_operator_endpoint.h */
-	char *pm_metrics_listen;	/* fpm-ng: where that path binds; default 127.0.0.1:8080 */
+	char *pm_status_path;		/* fpm-ng: upstream meaning on pool.type = fastcgi only — a path answered on the pool's own FastCGI socket (fpm_status.c). Every non-fastcgi type refuses it; operator.status_path is the separate HTTP endpoint (issue #386). */
+	/* fpm-ng: the per-pool operator endpoint's directives. Issue #386 moved
+	 * these out of the "pm." namespace, which never described them. See
+	 * fpm_operator_endpoint.h for the model and the defaults. */
+	char *operator_status_path;	/* JSON status page, unset = off */
+	char *operator_status_listen;	/* where operator.status_path binds, default 127.0.0.1:9253 */
+	char *operator_metrics_path;	/* Prometheus text, unset = off */
+	char *operator_metrics_listen;	/* where operator.metrics_path binds, default 127.0.0.1:9253 */
+	int operator_status;		/* operator.status = on -> derive /status/<pool name> */
+	int operator_metrics;		/* operator.metrics = on -> derive /metrics/<pool name> */
 	char *ping_path;
 	char *ping_response;
 	char *access_log;
@@ -204,6 +210,16 @@ struct fpm_worker_pool_config_s {
 	 * no hot reload of routes, a reload restarts the gateway as it always did.
 	 * NULL/empty = today's gateway: one target, the pool's own listener, at
 	 * prefix "/". */
+	/* Issue #389: what the gateway does with its OWN public port. Both stay in
+	 * the "http." namespace on purpose: they do not configure the operator
+	 * listener (that is operator.*, issue #386), they configure whether the
+	 * gateway's public listener also answers with every exposed pool's operator
+	 * pages. http.operator = yes serves them at <operator base>/<pool name> and
+	 * requires http.operator_allowed_clients (a separate ACL from
+	 * http.allowed_clients). See docs/gateway.md, "URLs: local and through the
+	 * gateway". */
+	int http_operator;			/* http.operator = yes|no; default no */
+	char *http_operator_allowed_clients;	/* who may reach the forwarded operator pages; required when http.operator = yes */
 	struct key_value_s *http_routes;
 	char *http_allowed_clients;		/* like listen.allowed_clients, but for the HTTP gateway; empty = no restriction */
 	char *http_trusted_proxies;		/* addresses trusted for X-Forwarded-* headers; empty = trust nobody (safe default), see fpm_http_forwarded.c */

@@ -3,7 +3,6 @@ fpm-ng: legal pool.type values with the fiber executor start, serve one request,
 --SKIPIF--
 <?php
 include "fpmng-skipif.inc";
-fpmng_skip_if_pool_type_unsupported('http');
 
 $binary = getenv('TEST_PHP_FPM_EXECUTABLE') ?: FPM\Tester::findExecutable();
 exec(escapeshellarg($binary) . ' -i 2>&1', $output, $status);
@@ -21,6 +20,8 @@ $dir = __DIR__;
 function exercise(string $label, string $extraConfig, bool $http = false): void
 {
     global $dir;
+    /* Issue #388: an HTTP front is a gateway pool routing to this one. */
+    $gateway = $http ? "[gw]\npool.type = gateway\nlisten = {{ADDR[http]}}\nchdir = $dir\nhttp.route[matrix] = /" : '';
     /* max_execution_time is pinned in the pool, not inherited: fpm_pool_coop.c:263
      * refuses a fiber pool unless it is 0 (one setitimer()/SIGPROF timer per
      * process cannot represent N concurrent deadlines), and php-fpm-ng is
@@ -32,6 +33,7 @@ function exercise(string $label, string $extraConfig, bool $http = false): void
 [global]
 error_log = {{FILE:LOG}}
 pid = {{FILE:PID}}
+$gateway
 [matrix]
 listen = {{ADDR}}
 chdir = $dir
@@ -64,20 +66,23 @@ EOT;
     echo "$label: ok\n";
 }
 
-/* pool.executor = fiber spelled out: without it this case is pool.type = http
- * on the classic executor, i.e. character for character what
- * fpmng-pool-type-classic-matrix.phpt's http-classic case already covers, in a
- * file that only runs in an --enable-fpmng-fiber build (issue #87).
+/* pool.executor = fiber spelled out: without it this case is pool.type =
+ * fastcgi on the classic executor, which fpmng-pool-type-classic-matrix.phpt
+ * already covers, in a file that only runs in an --enable-fpmng-fiber build
+ * (issue #87).
  *
- * The retired pool type's fiber cell (issue #376/#379) is gone: http x fiber
- * is the surviving fiber configuration, and it is already this file's other
- * cell, so the matrix lost a row rather than gaining a substitute. */
-exercise('http-fiber', "pool.type = http\npool.executor = fiber\nhttp.listen = {{ADDR[http]}}", http: true);
+ * Issue #388 retired pool.type = http, the type the fiber executor used to
+ * hang off; it is an executor of pool.type = fastcgi now. One cell speaks
+ * FastCGI to the pool directly, the other goes through a gateway that routes
+ * to it -- the shape that replaced the retired type. */
+exercise('fastcgi-fiber', "pool.type = fastcgi\npool.executor = fiber");
+exercise('gateway-fastcgi-fiber', "pool.type = fastcgi\npool.executor = fiber", http: true);
 
 ?>
 Done
 --EXPECT--
-http-fiber: ok
+fastcgi-fiber: ok
+gateway-fastcgi-fiber: ok
 Done
 --CLEAN--
 <?php

@@ -30,8 +30,15 @@ enum fpm_pool_state_e {
 	FPM_POOL_STATE_IDLE		/* doing nothing now, waiting for the next due time (cron between runs) */
 };
 
+/* One supervisor child's observational heartbeat, keyed by its stable
+ * scoreboard slot. */
+struct fpm_pool_heartbeat_s {
+	time_t last_heartbeat; /* epoch, 0 = this child has not called yet */
+};
+
 /* Filled by fpm_pool_type_s.status() for types with serves_requests = 0.
- * Exactly the fields the operator pages show — see docs/NOTES.md section 3u. */
+ * Shared state consumed by the operator page renderers; see docs/NOTES.md
+ * section 3u. Format-specific fields are rendered only where they apply. */
 struct fpm_pool_status_s {
 	enum fpm_pool_state_e state;
 	time_t last_start;		/* epoch, 0 = never started */
@@ -57,24 +64,16 @@ struct fpm_pool_status_s {
 	unsigned stale:1;		/* 1 = a scheduled run is overdue past cron.expect_within */
 	time_t stale_since;		/* the schedule's due time this is stale against; 0 if not stale */
 
-	/* fpmng_supervisor_heartbeat() (issue #327), supervisor only.
-	 * has_heartbeat = the script has called it at least once in this process's
-	 * lifetime (shared memory, so it also survives this process being
-	 * respawned -- the shared struct is keyed by pool, not by process, see
-	 * fpm_pool_supervisor_shared_for()). last_heartbeat is the raw timestamp;
-	 * the age an operator cares about ("stuck since...") is
-	 * FPM_NOW() - last_heartbeat, computed where it is rendered rather than
-	 * stored, exactly like next_run/uptime. FPM_NOW() on both sides, never
-	 * time(NULL) on one of them: see issue #396 and fpm_debug_clock.h.
-	 *
-	 * NOTE: the shared struct this is stored in is allocated once per POOL, not
-	 * per child, so with supervisor.processes > 1 every child of the pool
-	 * shares and overwrites the same has_heartbeat/last_heartbeat pair --
-	 * "last call from any child in this pool", not "per child". Tracking it per
-	 * child would need a per-child key into shared memory that does not exist
-	 * today; see the supervisor heartbeat granularity follow-up issue. */
+	/* fpmng_supervisor_heartbeat() (issues #327, #356), supervisor only.
+	 * has_heartbeat/last_heartbeat retain the pool-wide latest call for
+	 * backward-compatible status and metrics. The operator JSON also receives
+	 * a slot-indexed timestamp array so it can associate each live child PID
+	 * with that child's independent heartbeat. Timestamps are raw FPM_NOW()
+	 * epochs; ages are derived when rendered, never stored. */
 	unsigned has_heartbeat:1;
 	time_t last_heartbeat;
+	struct fpm_pool_heartbeat_s *heartbeat_by_slot;
+	unsigned long heartbeat_slots;
 };
 
 /* One extra Prometheus/JSON gauge from fpm_pool_type_s.live_gauges() below
@@ -122,21 +121,48 @@ struct fpm_pool_type_s {
 	const char *name;
 
 	/* What this type promises, and therefore what it withholds (issue #269,
-	 * implemented in #295). Data on the type like everything else here, so
-	 * that nothing anywhere compares a type NAME to decide how loudly to
-	 * announce it. The default, FPM_TIER_EXPERIMENTAL, is 0: a type added
-	 * without a thought about this field announces itself as the least
-	 * promised of the three, which is the honest reading of code nobody has
-	 * classified. Every type below states its tier explicitly all the same,
-	 * so that the value is a decision someone made rather than a field left
-	 * alone. Announced once per pool at startup by fpm_run(); see
-	 * fpm_tier.h. */
+	 * implemented in #295 and re-read against the same bar in #380). The
+	 * per-type rationale for each value is the comment next to its .tier
+	 * initialiser in fpm_pool_type.c. Data on the type like everything else
+	 * here, so that nothing anywhere compares a type NAME to decide how
+	 * loudly to announce it. The default, FPM_TIER_EXPERIMENTAL, is 0: a
+	 * type added without a thought about this field announces itself as the
+	 * least promised of the three, which is the honest reading of code
+	 * nobody has classified. Every type below states its tier explicitly
+	 * all the same, so that the value is a decision someone made rather
+	 * than a field left alone. Announced once per pool at startup by
+	 * fpm_run(); see fpm_tier.h. */
 	enum fpm_tier tier;
 
 	/* Configuration requirements — read by fpm_conf.c, which does not know types. */
 	unsigned requires_listen:1;		/* pool must have a listening address */
 	unsigned requires_pm:1;			/* pool must have meaningful pm/pm.max_children */
 	unsigned serves_requests:1;		/* counted in the request scoreboard */
+
+	/* Issue #388: this type IS an HTTP proxy and nothing else. It runs no
+	 * PHP and has no process manager, so:
+	 *   - `listen` is the PUBLIC HTTP(S) port the type's own child serves,
+	 *     not a FastCGI socket. The child accepts on the master's listening
+	 *     socket directly (fpm_http.c) and `http.listen` is refused as
+	 *     redundant.
+	 *   - routing is exactly http.route[]: there is no implicit "own pool"
+	 *     target at "/" (the target-0 row #340 adds for pool.type = http),
+	 *     at least one route is required at startup, and a request matching
+	 *     none is a local 404, never a forward.
+	 *   - the process count comes from http.gateways alone; there are no
+	 *     pm.max_children children to tie it to.
+	 * This is data on the type, not a name comparison in fpm_http.c: the
+	 * proxy machinery asks the flag, the way every other per-type decision
+	 * here is asked. */
+	unsigned proxy_only:1;
+
+	/* Issue #388: operator.metrics_path and operator.status_path default to
+	 * "/metrics" and "/status" on this type rather than to "off". Only the
+	 * gateway sets it: on it the operator listener is the one place its own
+	 * (and, since #389, every target's) pages can be scraped, so binding it
+	 * without being asked is the useful default. On every other type an
+	 * unset path means the pool is not exposed. */
+	unsigned operator_paths_default:1;
 
 	/* What a pool of this type speaks on its own listener, asked by the HTTP
 	 * gateway's router when http.route[] names it as a target (issue #340).
@@ -207,26 +233,6 @@ struct fpm_pool_type_s {
 	 * execute the ACME client (issue #48, criterion 7). */
 	unsigned publishes_acme_challenges:1;
 
-	/* A child of this type keeps its FastCGI transport state and its signal
-	 * handlers across requests instead of tearing them down and rebuilding
-	 * them per request. It turns on two things in the child, both of which
-	 * exist because upstream assumes a worker may be handed to an arbitrary
-	 * front end between requests and we know it is not:
-	 *
-	 *   fcgi_set_optimized_transport()    patches 0004/0005: keep the
-	 *     connection's buffers and use writev for large responses, instead of
-	 *     the conservative per-request path main/fastcgi.c takes otherwise.
-	 *   zend_signal_use_persistent_handlers()   patch 0006: install the Zend
-	 *     signal handlers once instead of on every zend_signal_activate().
-	 *
-	 * Set it for a type whose children speak FastCGI over a connection the
-	 * type itself owns for the child's lifetime -- the workers behind "http",
-	 * including their fiber and async variants. NOT for
-	 * plain "fastcgi", whose connection comes from whatever front end dialled
-	 * in, and not for "http-direct", which speaks HTTP itself and never
-	 * touches main/fastcgi.c. See fpm.c, which reads this in the child. */
-	unsigned reuses_request_runtime:1;
-
 	/* This type's own SIGUSR1 handler drains a single child instead of
 	 * treating it as a log-reopen: stop accepting, finish what is already
 	 * open, exit on its own within http.read_timeout (issue #65). Data for
@@ -280,17 +286,11 @@ struct fpm_pool_type_s {
 	 * because for such a type the name may well be valid elsewhere. */
 	unsigned executors_type_specific:1;
 
-	/* This type has nothing in front of it that could answer an operator's
-	 * scrape, so a pool of it serves its own stats and metrics from a small
-	 * HTTP listener of its own -- see fpm_operator_endpoint.h and issue #273.
-	 * Set for cron, supervisor, http and http-direct.
-	 *
-	 * Off for fastcgi, where it changes what pm.status_path
-	 * means: with the flag off the path keeps its upstream meaning, answered on
-	 * the pool's own FastCGI socket by whatever web server is already in front
-	 * of it, which on those types is exactly what an operator has (#273,
-	 * point 2). The flag is therefore not cosmetic and not a default -- adding
-	 * it to a type moves that type's status endpoint onto another socket.
+	/* This type can opt in to a small HTTP operator listener of its own -- see
+	 * fpm_operator_endpoint.h and issue #273. Set for cron, supervisor, gateway,
+	 * http-direct and fastcgi. On fastcgi this enables only operator.*; upstream
+	 * pm.status_path keeps its separate meaning on the pool's own FastCGI socket
+	 * (issue #383 after the namespace split in #386).
 	 *
 	 * Data rather than a name comparison in fpm_conf.c, which must not learn
 	 * the name of a pool type. */
@@ -355,19 +355,18 @@ struct fpm_pool_type_s {
 	 * NULL-terminated, may be NULL. Exact names only -- a prefix here would be
 	 * a second pattern language arguing with the first one.
 	 *
-	 * It exists because the operator endpoint's directives live under "pm."
-	 * (pm.status_path and friends, issue #273) while the types that most need
-	 * that endpoint -- cron, supervisor -- reject the whole "pm." namespace,
-	 * and for a good reason: their pm.* is generated programmatically, so a
-	 * user-set one would be a second source of truth. The carve-out keeps that
-	 * reason intact and names the handful of exceptions instead of weakening
-	 * the prefix.
+	 * It exists because a type sometimes rejects a whole namespace while
+	 * accepting a few exact names in it: pool.executor = worker rejects the
+	 * whole "worker." namespace, then carves its own directives back out.
+	 * (Before issue #386 it also carved the operator endpoint's directives out
+	 * of the "pm." namespace that cron and supervisor reject; the rename to
+	 * "operator." removed that need.)
 	 *
-	 * Not by dropping the prefix and enumerating the ~20 real pm.* directives:
+	 * Not by dropping the prefix and enumerating every real directive in it:
 	 * that is the enumeration-versus-pattern mistake build/prepare.sh:75-79
-	 * documents, and a pm.* added later would silently become legal on a cron
-	 * pool. An exception must be added deliberately; a new directive must not
-	 * become one by omission. */
+	 * documents, and a directive added later would silently become legal on a
+	 * pool that rejects its namespace. An exception must be added deliberately;
+	 * a new directive must not become one by omission. */
 	const char *const *reject_exceptions;
 
 	/* Type-specific checks; NULL = none. Returns 0 or -1. */
@@ -453,6 +452,20 @@ struct fpm_pool_type_s {
 	 * respawned does not touch it. */
 	const char *baseline_counter;
 
+	/* Issue #390: the VALUE of .baseline_counter for a serves_requests = 0 type
+	 * whose counter does not live in the shared scoreboard. The alternative --
+	 * moving the number into .status()'s fpm_pool_status_s.baseline -- would
+	 * work for the gateway only by giving it a state block it does not have, and
+	 * fpm_operator_pages.c would then have to render that zeroed state as a
+	 * measured one. This callback reports the counter and nothing else.
+	 *
+	 * NULL = read the shared scoreboard's `requests` (a serves_requests type,
+	 * or a types-less count that never happens). Only the gateway sets it today:
+	 * fpm_http_gateway_baseline_requests(). Called from the operator endpoint's
+	 * own child, so -- same contract as .status() and .live_gauges() -- shared
+	 * memory and configuration only. */
+	unsigned long (*baseline)(struct fpm_worker_pool_s *wp);
+
 	/* Extra per-pool gauges the fixed row shape above has no field for --
 	 * issue #333, the worker executor's currently-pending and watcher counts.
 	 * Orthogonal to serves_requests: unlike .status(), which is the WHOLE
@@ -467,6 +480,14 @@ struct fpm_pool_type_s {
 	 * process's heap. Returns how many of the up to FPM_POOL_LIVE_GAUGES_MAX
 	 * slots in out[] it filled. */
 	int (*live_gauges)(struct fpm_worker_pool_s *wp, struct fpm_pool_live_gauge_s out[FPM_POOL_LIVE_GAUGES_MAX]);
+
+	/* Branch async: how many FastCGI connections one child of this type
+	 * serves at once, for a gateway sizing its upstream budget towards it
+	 * (fpm_http_routes_build(): pm.max_children times this). 0 means 1, a
+	 * classic child. Set by the fiber/async executors, which multiplex many
+	 * requests in one process; appended at the end of the struct so the
+	 * branch's diff against main stays additive (issue #371). */
+	unsigned requests_per_child;
 };
 
 /* Type with this name, or NULL. An empty name gives the default (fastcgi) type
@@ -511,11 +532,5 @@ struct fpm_worker_pool_s *fpm_pool_type_current_pool(void);
 
 /* Reject directives unsupported by this type. 0 or -1. */
 int fpm_pool_type_check_directives(struct fpm_worker_pool_s *wp, const struct fpm_pool_type_s *type);
-
-/* Reject a type this BINARY cannot honour, as opposed to one this
- * CONFIGURATION misuses. 0 or -1. Always present; on the ordinary build it has
- * nothing to reject. See the definition for why it is keyed off the capability
- * bits rather than off type names. */
-int fpm_pool_type_check_build_support(struct fpm_worker_pool_s *wp, const struct fpm_pool_type_s *type);
 
 #endif

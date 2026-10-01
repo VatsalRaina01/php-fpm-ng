@@ -61,6 +61,8 @@ const char *const fpm_pool_async_rejects[] = {
 	"request_slowlog_trace_depth",
 	"slowlog",
 	"ping.",				/* ping is handled by the fpm_main.c loop, not us */
+	"pm.status_path",			/* so is upstream's FastCGI status page */
+	"http.",				/* http.* tunes a gateway; this pool is a gateway's target, not one */
 	"fiber.",				/* worker replacement after file changes lives in the Fiber scheduler */
 	"worker.",				/* worker.* means pool.executor = worker, a different executor entirely (issue #331) */
 	NULL

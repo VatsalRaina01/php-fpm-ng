@@ -3,7 +3,6 @@ fpm-ng: fiber executor arbitrates flock() between fibers of one process instead 
 --SKIPIF--
 <?php
 include "fpmng-skipif.inc";
-fpmng_skip_if_pool_type_unsupported('http');
 
 $binary = getenv('TEST_PHP_FPM_EXECUTABLE') ?: FPM\Tester::findExecutable();
 exec(escapeshellarg($binary) . ' -i 2>&1', $output, $status);
@@ -140,14 +139,18 @@ $cfg = <<<EOT
 [global]
 error_log = {{FILE:LOG}}
 pid = {{FILE:PID}}
+[gw]
+pool.type = gateway
+listen = {{ADDR[http]}}
+chdir = $docRoot
+http.route[web] = /
 [web]
 listen = {{ADDR}}
 chdir = $docRoot
 pm = static
 pm.max_children = 1
-pool.type = http
+pool.type = fastcgi
 pool.executor = fiber
-http.listen = {{ADDR[http]}}
 ; The "fiber: bailout escaped/suspended outside" warnings asserted absent
 ; below are emitted by the CHILD; stock FPM discards child stderr, so
 ; without this the expectNoLogPattern() call would be vacuous.

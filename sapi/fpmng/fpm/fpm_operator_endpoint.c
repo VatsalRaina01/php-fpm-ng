@@ -20,15 +20,10 @@
 #include "fpm_pool_type.h"
 #include "zlog.h"
 
-#define FPM_OPERATOR_ENDPOINT_DEFAULT_LISTEN "127.0.0.1:8080"
-
-const char *const fpm_operator_endpoint_directives[] = {
-	"pm.status_path",
-	"pm.status_listen",
-	"pm.metrics_path",
-	"pm.metrics_listen",
-	NULL
-};
+/* Issue #386 moved this off 8080, a port applications run on, to the Prometheus
+ * registry's PHP-FPM exporter port: one operator listener per box is the usual
+ * arrangement, and a scraper that already knows 9253 does not need telling. */
+#define FPM_OPERATOR_ENDPOINT_DEFAULT_LISTEN "127.0.0.1:9253"
 
 /* The internal listener pool runs no PHP, reads no request and has no FastCGI
  * transport, so everything that describes one is meaningless on it. It is not
@@ -38,6 +33,10 @@ const char *const fpm_operator_endpoint_directives[] = {
 const char *const fpm_operator_endpoint_rejects[] = {
 	"pm",
 	"pm.",
+	/* The operator endpoint IS this pool, so an operator.* directive copied
+	 * onto it (issue #386) would describe a listener answering about itself.
+	 * Same reason as "pm." above. */
+	"operator.",
 	"request_terminate_timeout",
 	"request_terminate_timeout_track_finished",
 	"request_slowlog_timeout",
@@ -55,8 +54,8 @@ const char *const fpm_operator_endpoint_rejects[] = {
 };
 
 enum fpm_operator_format_e {
-	FPM_OPERATOR_FORMAT_JSON = 0,	/* pm.status_path */
-	FPM_OPERATOR_FORMAT_PROMETHEUS	/* pm.metrics_path */
+	FPM_OPERATOR_FORMAT_JSON = 0,	/* operator.status_path */
+	FPM_OPERATOR_FORMAT_PROMETHEUS	/* operator.metrics_path */
 };
 
 struct fpm_operator_route_s {
@@ -95,7 +94,8 @@ int fpm_operator_endpoint_validate(struct fpm_worker_pool_s *wp) /* {{{ */
 
 /* A path an operator endpoint will answer on. The rules are upstream's for
  * pm.status_path, kept identical so that a path which was legal before the
- * meaning change in #278 is still legal after it. */
+ * meaning change in #278 is still legal after it. Issue #386 reuses the same
+ * class for pool names, because the name becomes a path segment. */
 static int fpm_operator_endpoint_check_path(struct fpm_worker_pool_s *wp, const char *directive,
 	const char *path) /* {{{ */
 {
@@ -178,8 +178,8 @@ static int fpm_operator_listener_identity_ok(struct fpm_operator_listener_s *l,
 
 /* Listener for this address, creating it (and its internal pool) on first use.
  *
- * Addresses are compared as configured, so "localhost:8080" and
- * "127.0.0.1:8080" are two listeners rather than one. That is deliberate: the
+ * Addresses are compared as configured, so "localhost:9253" and
+ * "127.0.0.1:9253" are two listeners rather than one. That is deliberate: the
  * alternative is resolving names at configuration time and calling two spellings
  * equal on the strength of it, and the failure mode of being wrong there is
  * silently merging two operators' endpoints. Being wrong the way it is now
@@ -247,8 +247,14 @@ static void fpm_operator_listener_note_path(struct fpm_operator_listener_s *l, c
 }
 /* }}} */
 
+/* derived: this route was inserted by a type's DEFAULT path (issue #388: the
+ * gateway's /status and /metrics when the operator set nothing), not by a
+ * directive the operator wrote. A derived route that collides is dropped with
+ * a NOTICE instead of refusing startup: several gateways share the default
+ * operator address 127.0.0.1:9253, and only one of them can own /status there.
+ * An explicit path still collides loudly -- the operator chose it. */
 static int fpm_operator_endpoint_add_route(struct fpm_worker_pool_s *wp, const char *directive,
-	const char *listen_address, const char *path, enum fpm_operator_format_e format) /* {{{ */
+	const char *listen_address, const char *path, enum fpm_operator_format_e format, int derived) /* {{{ */
 {
 	struct fpm_operator_listener_s *l;
 	struct fpm_operator_route_s *r, *tail;
@@ -279,6 +285,21 @@ static int fpm_operator_endpoint_add_route(struct fpm_worker_pool_s *wp, const c
 	for (r = l->routes; r; r = r->next) {
 		if (strcmp(r->path, path) != 0) {
 			continue;
+		}
+
+		if (derived) {
+			/* Issue #388: the gateway's default /status and /metrics are
+			 * offered, not demanded. When another pool already owns the path on
+			 * this address -- the normal case with two gateways on the default
+			 * 127.0.0.1:9253 -- this one keeps its page off rather than making
+			 * the whole configuration refuse to start. The operator can still
+			 * give it a page with an explicit operator.status_path/metrics_path
+			 * (or a listen address of its own). */
+			zlog(ZLOG_NOTICE, "[pool %s] the default %s = %s is already answered by pool '%s' "
+				"on %s; this pool keeps that page off -- set it explicitly for this pool, or give "
+				"it its own operator listen address", wp->config->name, directive, path,
+				r->pool->config->name, listen_address);
+			return 0;
 		}
 
 		/* The commonest way to hit this is one pool pointing both of its
@@ -333,48 +354,192 @@ static int fpm_operator_endpoint_add_route(struct fpm_worker_pool_s *wp, const c
 }
 /* }}} */
 
+/* Issue #386: a pool that exposes an operator page must have a name that can be
+ * a URL segment -- locally it names the derived path's last segment, and a
+ * gateway later forwards <base>/<pool name>. Refused with the offending byte
+ * rather than skipped with a warning: a page that silently does not exist is
+ * worse than a pool that does not start. The character class is the one the
+ * paths themselves use; the flag is the case where the name IS the path. */
+static int fpm_operator_endpoint_check_pool_name(struct fpm_worker_pool_s *wp) /* {{{ */
+{
+	const char *name = wp->config->name;
+	size_t i;
+
+	for (i = 0; name[i]; i++) {
+		if (!isalnum((unsigned char) name[i]) && name[i] != '/' && name[i] != '-'
+			&& name[i] != '_' && name[i] != '.' && name[i] != '~') {
+			zlog(ZLOG_ALERT, "[pool %s] this pool exposes an operator page, so its name must "
+				"contain only the characters '[alphanum]/_-.~' -- the name is a URL path segment "
+				"(issue #386); it has '%c' at position %zu", name, name[i], i);
+			return -1;
+		}
+	}
+
+	return 0;
+}
+/* }}} */
+
+/* "<base>/<pool name>" into buf. Returns -1 when it does not fit. */
+static int fpm_operator_endpoint_derive_path(char *buf, size_t size, const char *base,
+	const char *name) /* {{{ */
+{
+	int n = snprintf(buf, size, "%s/%s", base, name);
+
+	if (n < 0 || (size_t) n >= size) {
+		return -1;
+	}
+	return 0;
+}
+/* }}} */
+
 int fpm_operator_endpoint_configure(struct fpm_worker_pool_s *wp, const struct fpm_pool_type_s *type) /* {{{ */
 {
-	const char *status_path = wp->config->pm_status_path;
-	const char *metrics_path = wp->config->pm_metrics_path;
+	const char *status_path = wp->config->operator_status_path;
+	const char *metrics_path = wp->config->operator_metrics_path;
+	const char *status_listen = wp->config->operator_status_listen;
+	const char *metrics_listen = wp->config->operator_metrics_listen;
+	char derived_status[192];
+	char derived_metrics[192];
+	int status_derived = 0;
+	int metrics_derived = 0;
 
 	if (!type->operator_endpoint) {
 		return 0;
 	}
 
-	/* #273, point 4: no on/off directive. The endpoint exists iff a path is
-	 * set, so a pool that configured neither binds nothing and no internal
-	 * listener pool is created for it. */
+	/* Issue #388: on the gateway the two pages DEFAULT to being set, so a
+	 * fresh gateway binds its operator listener on loopback without being
+	 * asked (docs/gateway.md). Every other type keeps "unset = off". The flag
+	 * is data on the type, never a name test here.
+	 *
+	 * An explicit `operator.status = off` (or `operator.metrics = off`) must
+	 * stay off: the flag parses to 0, which is indistinguishable from "unset"
+	 * by value, so the decision is made on whether the directive was SET
+	 * (fpm_conf_directive_was_set), exactly as fpm_conf.c does elsewhere. An
+	 * explicit path, empty or not, also suppresses the default.
+	 *
+	 * An explicit "" is the way to turn an already-defaulted page off, and it
+	 * is a warning rather than silence because the operator wrote the
+	 * directive: on the gateway that also disables the <base>/<pool> forwarding
+	 * for that format (#389), which is easy to do by accident. */
+	if (type->operator_paths_default) {
+		if (!wp->config->operator_status
+				&& !fpm_conf_directive_was_set(wp->config, "operator.status")
+				&& !fpm_conf_directive_was_set(wp->config, "operator.status_path")) {
+			status_path = "/status";
+			status_derived = 1;
+		} else if (status_path && !*status_path) {
+			zlog(ZLOG_WARNING, "[pool %s] operator.status_path is empty: the gateway's "
+				"own status page and the /status/<pool> forwarding are disabled",
+				wp->config->name);
+			status_path = NULL;
+		}
+		if (!wp->config->operator_metrics
+				&& !fpm_conf_directive_was_set(wp->config, "operator.metrics")
+				&& !fpm_conf_directive_was_set(wp->config, "operator.metrics_path")) {
+			metrics_path = "/metrics";
+			metrics_derived = 1;
+		} else if (metrics_path && !*metrics_path) {
+			zlog(ZLOG_WARNING, "[pool %s] operator.metrics_path is empty: the gateway's "
+				"own metrics page and the /metrics/<pool> forwarding are disabled",
+				wp->config->name);
+			metrics_path = NULL;
+		}
+	}
+
+	/* #273, point 4: no mandatory on/off directive. The endpoint exists iff a
+	 * path -- or the flag that spells one -- is set, so a pool that configured
+	 * neither binds nothing and no internal listener pool is created for it.
+	 * The flag is exactly the path it derives, so setting both is refused
+	 * (issue #386) rather than picking one silently. */
+	if (wp->config->operator_status) {
+		if (status_path && *status_path) {
+			zlog(ZLOG_ALERT, "[pool %s] 'operator.status = on' and 'operator.status_path = %s' "
+				"are two spellings of the same page; set one or the other (issue #386)",
+				wp->config->name, status_path);
+			return -1;
+		}
+		if (0 > fpm_operator_endpoint_derive_path(derived_status, sizeof(derived_status),
+				"/status", wp->config->name)) {
+			zlog(ZLOG_ALERT, "[pool %s] operator.status = on derives a path longer than %zu bytes",
+				wp->config->name, sizeof(derived_status));
+			return -1;
+		}
+		status_path = derived_status;
+	}
+
+	if (wp->config->operator_metrics) {
+		if (metrics_path && *metrics_path) {
+			zlog(ZLOG_ALERT, "[pool %s] 'operator.metrics = on' and 'operator.metrics_path = %s' "
+				"are two spellings of the same page; set one or the other (issue #386)",
+				wp->config->name, metrics_path);
+			return -1;
+		}
+		if (0 > fpm_operator_endpoint_derive_path(derived_metrics, sizeof(derived_metrics),
+				"/metrics", wp->config->name)) {
+			zlog(ZLOG_ALERT, "[pool %s] operator.metrics = on derives a path longer than %zu bytes",
+				wp->config->name, sizeof(derived_metrics));
+			return -1;
+		}
+		metrics_path = derived_metrics;
+	}
+
+	if (status_path && *status_path) {
+		if (0 > fpm_operator_endpoint_check_pool_name(wp)) {
+			return -1;
+		}
+	} else if (metrics_path && *metrics_path) {
+		if (0 > fpm_operator_endpoint_check_pool_name(wp)) {
+			return -1;
+		}
+	}
+
 	/* Every type with an operator endpoint registers its status route here, and
 	 * the other half of the rule -- that the pool's own listener does not answer
-	 * the same path -- is enforced in the child, by
-	 * fpm_child_operator_endpoint_owns_status() in fpm_children.c for the types
-	 * that go through fpm_main.c and by fpm_http_direct_ops_init_child() for
-	 * http-direct. One directive, one page, one socket. */
+	 * the same path -- holds by construction since #386: upstream's in-child
+	 * handler reads pm.status_path, which these types no longer accept, so
+	 * operator.status_path is answered only on this listener. One directive, one
+	 * page, one socket. */
 	if (status_path && *status_path) {
-		const char *listen = wp->config->pm_status_listen;
-
-		if (!listen || !*listen) {
-			listen = FPM_OPERATOR_ENDPOINT_DEFAULT_LISTEN;
+		if (!status_listen || !*status_listen) {
+			status_listen = FPM_OPERATOR_ENDPOINT_DEFAULT_LISTEN;
 		}
-		if (0 > fpm_operator_endpoint_add_route(wp, "pm.status_path", listen, status_path,
-				FPM_OPERATOR_FORMAT_JSON)) {
+		if (0 > fpm_operator_endpoint_add_route(wp, "operator.status_path", status_listen, status_path,
+				FPM_OPERATOR_FORMAT_JSON, status_derived)) {
 			return -1;
 		}
 	}
 
 	if (metrics_path && *metrics_path) {
-		const char *listen = wp->config->pm_metrics_listen;
-
-		if (!listen || !*listen) {
-			listen = FPM_OPERATOR_ENDPOINT_DEFAULT_LISTEN;
+		if (!metrics_listen || !*metrics_listen) {
+			metrics_listen = FPM_OPERATOR_ENDPOINT_DEFAULT_LISTEN;
 		}
-		if (0 > fpm_operator_endpoint_add_route(wp, "pm.metrics_path", listen, metrics_path,
-				FPM_OPERATOR_FORMAT_PROMETHEUS)) {
+		if (0 > fpm_operator_endpoint_add_route(wp, "operator.metrics_path", metrics_listen, metrics_path,
+				FPM_OPERATOR_FORMAT_PROMETHEUS, metrics_derived)) {
 			return -1;
 		}
 	}
 
+	return 0;
+}
+/* }}} */
+
+int fpm_operator_endpoint_route(struct fpm_worker_pool_s *wp, int metrics,
+	const char **address, const char **path) /* {{{ */
+{
+	struct fpm_operator_listener_s *l;
+	struct fpm_operator_route_s *r;
+	enum fpm_operator_format_e want = metrics ? FPM_OPERATOR_FORMAT_PROMETHEUS : FPM_OPERATOR_FORMAT_JSON;
+
+	for (l = fpm_operator_listeners; l; l = l->next) {
+		for (r = l->routes; r; r = r->next) {
+			if (r->pool == wp && r->format == want) {
+				*address = l->address;
+				*path = r->path;
+				return 1;
+			}
+		}
+	}
 	return 0;
 }
 /* }}} */
