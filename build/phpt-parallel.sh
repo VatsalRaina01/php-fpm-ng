@@ -9,7 +9,9 @@
 # (build/phpt-fixture-patches/README.md says why). Two changes, both idempotent:
 #
 #   1. build/phpt-fixture-patches/*.patch: run-tests.php tells each test which
-#      worker runs it, and tester.inc allocates ports from that worker's block.
+#      worker runs it, and tester.inc allocates ports from that worker's block;
+#      run-tests.php no longer retries a test whose output says "address already
+#      in use", so a port collision fails instead of passing as WARN (#562).
 #   2. sapi/fpmng/tests/CONFLICTS is removed. Upstream ships it with the single
 #      word "all" (spurious failures on Azure), and run-tests.php then pulls
 #      every test of that directory out of the parallel pool and runs them one
@@ -31,18 +33,23 @@ fail() { echo "phpt-parallel.sh: FAIL: $*" >&2; exit 1; }
 [ -f "$TREE/run-tests.php" ] || fail "no run-tests.php below $TREE"
 
 # The patches are written against the tree's own layout (the harness lives in
-# sapi/fpmng/tests/ there, not in upstream's sapi/fpm/tests/). They carry the
-# issue marker, which is how a tree that is already patched is told from a
-# pristine one: patch --reverse --dry-run cannot, because BSD patch answers its
-# own "previously applied" prompt with yes.
-if ! grep -q 'Issue #394 (php-fpm-ng)' "$TESTS/tester.inc"; then
-    for p in "$REPO"/build/phpt-fixture-patches/*.patch; do
-        patch -d "$TREE" -p1 --forward --silent --no-backup-if-mismatch < "$p" >&2 ||
-            fail "$(basename "$p") does not apply to $TREE"
-    done
-fi
+# sapi/fpmng/tests/ there, not in upstream's sapi/fpm/tests/). Each carries an
+# issue marker in the file it changes, which is how a patched file is told from
+# a pristine one: patch --reverse --dry-run cannot, because BSD patch answers
+# its own "previously applied" prompt with yes. The marker is checked per patch,
+# so a tree patched by an earlier version of this script (only 0001 and 0002)
+# picks up the patches added since.
+apply_patch() { # <patch file> <file it changes, relative to the tree> <marker>
+    grep -q "$3" "$TREE/$2" && return 0
+    patch -d "$TREE" -p1 --forward --silent --no-backup-if-mismatch < "$REPO/build/phpt-fixture-patches/$1" >&2 ||
+        fail "$1 does not apply to $TREE"
+}
+apply_patch 0001-tester-port-base-per-worker.patch sapi/fpmng/tests/tester.inc 'Issue #394 (php-fpm-ng)'
+apply_patch 0002-run-tests-worker-env-for-tests.patch run-tests.php 'Issue #394 (php-fpm-ng)'
+apply_patch 0003-run-tests-no-retry-on-port-collision.patch run-tests.php 'Issue #562 (php-fpm-ng)'
 grep -q 'Issue #394 (php-fpm-ng)' "$TESTS/tester.inc" || fail "tester.inc has no TEST_PHP_WORKER after patching"
 grep -q 'Issue #394 (php-fpm-ng)' "$TREE/run-tests.php" || fail "run-tests.php does not hand TEST_PHP_WORKER to the tests after patching"
+grep -q 'Issue #562 (php-fpm-ng)' "$TREE/run-tests.php" || fail "run-tests.php still retries a test on 'address already in use' after patching"
 
 rm -f "$TESTS/CONFLICTS"
 
