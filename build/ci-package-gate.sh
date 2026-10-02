@@ -20,13 +20,12 @@
 # tests ask the binary whether it supports their pool type and skip when it
 # says no, instead of failing).
 #
-# Usage: build/ci-package-gate.sh deb|apk <prepared-php-src>|- <outdir>
-#   prepared-php-src  not read any more (issue #423): the build needs no php-src
-#                     (issue #422) and the test fixtures come from
-#                     third_party/php-src/ through build/phpt-tree.sh. Pass "-";
-#                     a directory is still accepted so the release workflow keeps
-#                     working until it is rewired (issue #424).
+# Usage: build/ci-package-gate.sh deb|apk <outdir>
 #   outdir            package, results and logs land here
+#
+# There is no php-src argument (issue #424): the build needs no php-src (issue
+# #422) and the test fixtures come from third_party/php-src/ through
+# build/phpt-tree.sh (issue #423).
 #
 # Runs on the host, not in a container: it drives `docker run` with bind
 # mounts, and -v paths are resolved by the host daemon.
@@ -34,11 +33,10 @@ set -eu
 
 fail() { echo "ci-package-gate.sh: FAIL: $*" >&2; exit 1; }
 
-FLAVOUR=${1:?usage: build/ci-package-gate.sh deb|apk <prepared-php-src>|- <outdir>}
-SRC=${2:?usage: build/ci-package-gate.sh deb|apk <prepared-php-src>|- <outdir>}
-OUT=${3:?usage: build/ci-package-gate.sh deb|apk <prepared-php-src>|- <outdir>}
+FLAVOUR=${1:?usage: build/ci-package-gate.sh deb|apk <outdir>}
+OUT=${2:?usage: build/ci-package-gate.sh deb|apk <outdir>}
+[ $# -eq 2 ] || fail "usage: build/ci-package-gate.sh deb|apk <outdir> (the php-src argument was removed in issue #424)"
 REPO=$(cd "$(dirname "$0")/.." && pwd)
-[ "$SRC" = - ] || echo "ci-package-gate.sh: note: $SRC is not read; the fixtures come from third_party/php-src (issue #423)" >&2
 mkdir -p "$OUT"
 OUT=$(cd "$OUT" && pwd)
 
@@ -505,7 +503,36 @@ command -v docker >/dev/null || fail "docker is not available; this script drive
 # The three cron tests from #355, #357 and #358 assumed the debug clock, which
 # the shipped binary does not have; they now run at real speed.
 EXPECT_FAIL=0
-EXPECT_TOTAL=166
+EXPECT_FAIL_NAMES=
+EXPECT_TOTAL=177
+
+# Measured for issue #424 (2026-10-02, ubuntu:26.04 with php8.5-dev 8.5.4 and
+# alpine:edge with php85 8.5.10/8.5.11), 177 owned tests, from this script run
+# unmodified on each cell. These replace every derivation above, which are kept
+# as HISTORICAL record of how the numbers moved up to v0.11.0 and are no longer
+# the pinned values (this also absorbs issue #555, whose 152/14 and 166/0 were
+# measured on the 166-test suite):
+#
+#   deb non-TLS  PASS 162  FAIL 0  SKIP 15
+#   deb TLS      PASS 176  FAIL 0  SKIP  1
+#   apk non-TLS  PASS 159  FAIL 1  SKIP 17
+#   apk TLS      PASS 170  FAIL 1  SKIP  6
+#
+# The +11 tests since the v0.11.0 count are the owned tests added after it
+# (the #428 ini-bootstrap pair among them). The one skip that survives on the deb TLS
+# row is fpmng-ini-bootstrap-extension.phpt: it needs
+# TEST_FPM_EXTENSION_DIR, which build-matrix.yml sets and this gate does not.
+#
+# The apk FAIL is a real defect, pinned here by name so that the gate says
+# exactly what is wrong instead of an unexplained skip hiding it; it is
+# expected to disappear when its issue is fixed, and the gate will then ask for
+# these numbers to be lowered:
+#   - fpmng-http-route-http-direct-fail.phpt: issue #467, libevent's evhttp on
+#     musl exits 1 when getnameinfo(AF_UNIX) fails.
+# A first measurement also failed fpmng-config-input-descriptor.phpt, while
+# Alpine edge carried php85-dev 8.5.10 next to libphp 8.5.11 and every start
+# printed the patch-level notice (issue #557). By the release rehearsal of
+# 2026-10-02 both were 8.5.11 and the test passed.
 
 # Issue #388 retired pool.type = http and split its proxy half into pool.type =
 # gateway. That changes the classification this whole block exists to pin,
@@ -537,8 +564,8 @@ EXPECT_TOTAL=166
 case "$FLAVOUR" in
 deb)
     IMAGE=ubuntu:26.04
-    if [ "$TLS_PACKAGE" = 1 ]; then EXPECT_PASS=165; EXPECT_SKIP=1
-    else EXPECT_PASS=151; EXPECT_SKIP=15; fi
+    if [ "$TLS_PACKAGE" = 1 ]; then EXPECT_PASS=176; EXPECT_SKIP=1
+    else EXPECT_PASS=162; EXPECT_SKIP=15; fi
     # binutils for objdump and nm (package-deb.sh resolves NEEDED sonames and
     # reads the binary's symbols with them),
     # php8.5-dev for the headers libphp-build.sh compiles against, the embed
@@ -571,8 +598,10 @@ deb)
     ;;
 apk)
     IMAGE=alpine:edge
-    if [ "$TLS_PACKAGE" = 1 ]; then EXPECT_PASS=160; EXPECT_SKIP=6
-    else EXPECT_PASS=149; EXPECT_SKIP=17; fi
+    EXPECT_FAIL=1 # issue #467, see the measurement block above
+    EXPECT_FAIL_NAMES='fpmng-http-route-http-direct-fail.phpt'
+    if [ "$TLS_PACKAGE" = 1 ]; then EXPECT_PASS=170; EXPECT_SKIP=6
+    else EXPECT_PASS=159; EXPECT_SKIP=17; fi
     # openssl-dev only for the TLS package (issue #294). Without it the build
     # stage does not get the headers that would let it link OpenSSL even by
     # accident, which is what a default build being TLS-free (issue #280) is
@@ -710,13 +739,14 @@ deb)
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -qq
 # binutils is strings(1), which build/run-fpmng-phpt.sh uses to identify the
-# binary under test; php8.5-cli is the harness that runs run-tests.php; openssl
+# binary under test; patch(1) is what build/phpt-parallel.sh applies its
+# fixture patches with (issue #394); php8.5-cli is the harness that runs run-tests.php; openssl
 # is not the library (that comes with the CLI) but its configuration file --
 # without /usr/lib/ssl/openssl.cnf openssl_pkey_new() fails with a bare
 # "No such file or directory" and the three ACME tests fail for a reason that
-# has nothing to do with the package. None of the three is a dependency of what
+# has nothing to do with the package. None of the four is a dependency of what
 # we ship: they belong to the test rig, and naming them here keeps that visible.
-apt-get install -y -qq binutils php8.5-cli openssl >/dev/null
+apt-get install -y -qq binutils patch php8.5-cli openssl >/dev/null
 apt-get install -y -qq "$(find /out -maxdepth 1 -name "${PKGNAME}_*.deb" ! -name 'wrong-minor*' | head -1)"
 dpkg -s "$PKGNAME" | grep -E '^(Package|Version|Depends|Conflicts|Replaces|Provides):'
 ldd /usr/sbin/php-fpm-ng | grep libphp
@@ -739,9 +769,9 @@ EOF
     ;;
 apk)
     cat >> "$OUT/stage2.sh" <<'EOF'
-# See the Debian branch: binutils and the CLI are the test rig, not package
+# See the Debian branch: binutils, patch and the CLI are the test rig, not package
 # dependencies.
-apk add --no-cache binutils php85 php85-openssl openssl >/dev/null
+apk add --no-cache binutils patch php85 php85-openssl openssl >/dev/null
 apk add --no-cache --allow-untrusted "$(find /out/repo -name "$PKGNAME-[0-9]*.apk" | head -1)"
 apk info -d "$PKGNAME"
 ldd /usr/sbin/php-fpm-ng | grep libphp
@@ -847,6 +877,17 @@ if [ "$GOT_OK" != "$EXPECT_PASS" ] || [ "$GOT_FAIL" != "$EXPECT_FAIL" ] \
   usually means the pool stopped starting, more passes means these expectations
   are stale.
   Per-test results are in $OUT/results/results.tsv."
+fi
+
+# The FAIL count alone cannot say WHICH tests fail: when a known defect is fixed
+# and a different test starts failing the numbers stay equal. So the names are
+# pinned as well (EXPECT_FAIL_NAMES, sorted, one per line).
+GOT_FAIL_NAMES=$(awk -F '\t' 'NR > 1 && $2 == "FAIL/ERROR" {n = split($1, a, "/"); print a[n]}' \
+    "$OUT/results/results.tsv" | sort)
+if [ "$GOT_FAIL_NAMES" != "$EXPECT_FAIL_NAMES" ]; then
+    fail "the failing tests are not the ones this cell pins.
+  expected: $(echo "$EXPECT_FAIL_NAMES" | tr '\n' ' ')
+  got:      $(echo "$GOT_FAIL_NAMES" | tr '\n' ' ')"
 fi
 
 echo "ci-package-gate.sh: PASS ($FLAVOUR package installed on a machine with no compiler, suite PASS=$GOT_PASS WARN=$GOT_WARN FAIL=$GOT_FAIL SKIP=$GOT_SKIP of $GOT_TOTAL)"
