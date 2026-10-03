@@ -482,6 +482,14 @@ struct fpm_pool_type_s {
 	 * process's heap. Returns how many of the up to FPM_POOL_LIVE_GAUGES_MAX
 	 * slots in out[] it filled. */
 	int (*live_gauges)(struct fpm_worker_pool_s *wp, struct fpm_pool_live_gauge_s out[FPM_POOL_LIVE_GAUGES_MAX]);
+
+	/* Branch async: how many FastCGI connections one child of this type
+	 * serves at once, for a gateway sizing its upstream budget towards it
+	 * (fpm_http_routes_build(): pm.max_children times this). 0 means 1, a
+	 * classic child. Set by the fiber/async executors, which multiplex many
+	 * requests in one process; appended at the end of the struct so the
+	 * branch's diff against main stays additive (issue #371). */
+	unsigned requests_per_child;
 };
 
 /* Type with this name, or NULL. An empty name gives the default (fastcgi) type

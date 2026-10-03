@@ -15,6 +15,32 @@ require_once "tester.inc";
  * decided by the type's own reject list and nothing else; there is no
  * "type unsupported by this binary" refusal left to short-circuit on. */
 
+/* Whether the async executor was compiled in, asked OF THE BINARY, not of the
+ * way it was built.
+ *
+ * This used to read the `Configure Command` line out of `php-fpm-ng -i`. That
+ * line exists only because we ran ./configure ourselves; a binary linked
+ * against a distribution libphp (build/libphp-build.sh) never printed it, and
+ * the test failed there for a reason that had nothing to do with rejected
+ * directives (issue #215).
+ *
+ * The two builds refuse `pool.executor = async` through two different code
+ * paths and say so differently: without the flag the executor entry has no
+ * .type and fpm_pool_type_resolve() names the flag that is missing
+ * (fpm_pool_type.c), with it the resolve succeeds and fpm_pool_async_validate()
+ * rejects the pool as policy (fpm_pool_async.c). Which sentence comes back is
+ * the binary stating its own build, and it is the only such statement there is:
+ * async is rejected in every build, so no accepted configuration differs.
+ *
+ * A build that lost the async sources would answer the other sentence and this
+ * probe would believe it -- so the answer is not taken on trust. The caller
+ * asserts the full message of the branch it picked AND that the other build's
+ * sentence is absent, which is what makes a half-changed message a failure
+ * rather than a silent change of branch. */
+const FPMNG_ASYNC_DISABLED_BY_POLICY = 'pool.executor = async is disabled';
+const FPMNG_ASYNC_NOT_BUILT = '--enable-fpmng-async';
+
+
 function expectConfigFailure(string $label, string $cfg, array $needles, array $forbidden = []): void
 {
     $tester = new FPM\Tester($cfg, '<?php echo "ok";');
@@ -41,6 +67,40 @@ function expectConfigFailure(string $label, string $cfg, array $needles, array $
     echo "$label: rejected\n";
 }
 
+/* See the comment at the top: the branch is chosen by what the binary says,
+ * and then both halves of that branch are asserted while the other build's
+ * sentence must be absent. */
+function expectAsyncRejected(string $cfg): void
+{
+    $tester = new FPM\Tester($cfg, '<?php echo "ok";');
+    $messages = $tester->testConfig(true);
+    if ($messages === null) {
+        echo "FAIL: async-disabled unexpectedly passed validation\n";
+        exit(1);
+    }
+    $text = implode("\n", $messages);
+
+    $builtIn = str_contains($text, FPMNG_ASYNC_DISABLED_BY_POLICY);
+    $needles = $builtIn
+        ? [FPMNG_ASYNC_DISABLED_BY_POLICY, 'pool.executor = classic or fiber']
+        : [FPMNG_ASYNC_NOT_BUILT];
+    $forbidden = $builtIn ? FPMNG_ASYNC_NOT_BUILT : FPMNG_ASYNC_DISABLED_BY_POLICY;
+
+    foreach ($needles as $needle) {
+        if (!str_contains($text, $needle)) {
+            echo "FAIL: async-disabled missing needle: $needle\n";
+            echo "got:\n$text\n";
+            exit(1);
+        }
+    }
+    if (str_contains($text, $forbidden)) {
+        echo "FAIL: async-disabled answered for both builds at once\n";
+        echo "got:\n$text\n";
+        exit(1);
+    }
+    echo "async-disabled: rejected\n";
+}
+
 $base = <<<EOT
 [global]
 error_log = {{FILE:LOG}}
@@ -54,6 +114,12 @@ expectConfigFailure(
     'fastcgi-http-directive',
     $base . "\nhttp.listen = 127.0.0.1:8080",
     ["'http.listen' is not supported by pool.type = fastcgi"]
+);
+
+expectConfigFailure(
+    'fastcgi-fiber-directive-on-classic',
+    $base . "\npool.type = fastcgi\nfiber.revalidate_freq = 0",
+    ["'fiber.revalidate_freq' is not supported by pool.type = fastcgi"]
 );
 
 expectConfigFailure(
@@ -74,10 +140,13 @@ expectConfigFailure(
     ['pool.executor is not supported by pool.type = supervisor']
 );
 
+/* On branch async pool.type = fastcgi carries the fiber/async executors, so
+ * pool.executor itself is accepted there; a name from another type's list is
+ * still unknown on this one. */
 expectConfigFailure(
-    'default-fastcgi-executor',
-    $base . "\npool.executor = classic",
-    ['pool.executor is not supported by pool.type = fastcgi']
+    'fastcgi-unknown-executor',
+    $base . "\npool.executor = worker",
+    ["unknown pool.executor 'worker'; known executors: classic, fiber, async"]
 );
 
 /* issue #376: pool.type = fastcgi-ng was removed. It is a retired name, not an
@@ -317,6 +386,16 @@ expectConfigFailure(
     ['pool.type = gateway with no http.route[] serves nothing']
 );
 
+/* pool.executor = async is rejected in both builds, but by two different code
+ * paths, so the case has to say which build it is looking at instead of
+ * inheriting one (issue #87). Without --enable-fpmng-async the executor entry
+ * has no .type and fpm_pool_type_resolve() names the flag that is missing
+ * (fpm_pool_type_validate_executor() in sapi/fpmng/fpm/fpm_pool_type.c); with the flag the resolve succeeds and
+ * fpm_pool_async_validate() rejects the pool as a matter of policy
+ * (sapi/fpmng/fpm/fpm_pool_async.c:73). Asserting only the first needle made
+ * this case fail in any --enable-fpmng-async build. */
+expectAsyncRejected($base . "\npool.type = fastcgi\npool.executor = async");
+
 /* Issue #593: the gateway has no connection cap, and http.max_connections* are
  * read only by http-direct, so a gateway config naming them must fail instead
  * of leaving the public port believed to be limited. */
@@ -352,10 +431,11 @@ expectConfigFailure(
 Done
 --EXPECT--
 fastcgi-http-directive: rejected
+fastcgi-fiber-directive-on-classic: rejected
 supervisor-listen: rejected
 cron-pm: rejected
 supervisor-executor: rejected
-default-fastcgi-executor: rejected
+fastcgi-unknown-executor: rejected
 retired-fastcgi-ng: rejected
 direct-worker-request-terminate-timeout: rejected
 direct-worker-stream: rejected
@@ -381,6 +461,7 @@ gateway-clear-env: rejected
 gateway-chroot: rejected
 gateway-http-listen-redundant: rejected
 gateway-no-routes: rejected
+async-disabled: rejected
 gateway-max-connections: rejected
 gateway-max-connections-per-client: rejected
 direct-keepalive-timeout: rejected

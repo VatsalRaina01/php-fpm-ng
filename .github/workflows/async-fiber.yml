@@ -1,0 +1,184 @@
+name: async-fiber
+
+# Branch `async` only (issue #620). The fiber/coop/async executors need two
+# php-src patches (async/patches/0007, 0008) that a distribution libphp cannot
+# carry, so they are built the old way, from a php-src tree prepared by
+# async/prepare.sh. main's build-matrix.yml knows nothing about this: it builds
+# the default SDK binary (and, on this branch, proves it holds no executor
+# symbols). This file is the only place a fiber binary is built and tested.
+#
+# Triggers: every PR into async and every push to async; workflow_call, so
+# async-sync.yml can run the same job on the merge commit before it publishes
+# it; workflow_dispatch by hand.
+on:
+  push:
+    branches: [async]
+  pull_request:
+    branches: [async]
+  workflow_dispatch:
+  workflow_call:
+    inputs:
+      ref:
+        description: "Commit to build and test"
+        type: string
+        required: true
+      with_async:
+        description: "Also configure and assert --enable-fpmng-async"
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || inputs.ref || github.sha }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  PHP_SRC_REPO: https://github.com/php/php-src.git
+  PHP_SRC_REF: php-8.5.9
+  # The configure line the fiber cell always used (before #373 and since).
+  FPMNG_CONFIGURE_FLAGS: --disable-all --enable-fpmng --enable-fpmng-tls --enable-fpmng-acme --enable-session --with-openssl --enable-fpmng-debug-clock
+
+defaults:
+  run:
+    # Not root: php-fpm refuses to start as root, and a root run reports every
+    # test SKIP and still goes green. Same shell as main's build-matrix.yml.
+    shell: runuser -u ci -- env HOME=/home/ci bash --noprofile --norc -eo pipefail {0}
+
+jobs:
+  # Hermetic, no build: the IO-seam boundary (issue #531).
+  fiber-hermetic:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.ref || github.sha }}
+      - name: verify fiber IO seam boundary (#531)
+        shell: bash
+        run: ./build/test-fiber-io-seam.sh
+
+  # Main's build contract on this branch (review of #620): build-matrix.yml
+  # runs only for main, so nothing else checks a push to async or the merge
+  # commit of async-sync.yml against it. The vendored tree must be pristine
+  # upstream, and the default SDK build must succeed and hold no
+  # fiber/coop/async symbols (libphp-build.sh runs
+  # async/check-no-fiber-symbols.sh on its own output). PRs into async also get
+  # main's full pipeline from build-matrix.yml; this job is what a sync or a
+  # direct push gets.
+  sdk-contract:
+    runs-on: ubuntu-latest
+    container:
+      image: ubuntu:26.04
+    env:
+      FPMNG_TLS: "1"
+      FPMNG_ACME: "1"
+      FPMNG_DEBUG_CLOCK: "1"
+    steps:
+      - name: git for actions/checkout
+        shell: bash
+        run: apt-get update -qq && apt-get install -y -qq --no-install-recommends git ca-certificates
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.ref || github.sha }}
+      - name: install the PHP 8.5 SDK and the toolchain
+        shell: bash
+        run: ./build/ci-install-deps.sh build
+      - name: the vendored php-src subset is pristine upstream
+        run: ./build/vendor-php-src.sh check
+      - name: default SDK build, no fiber/coop/async symbols
+        run: ./build/libphp-build.sh "$PWD/out-libphp"
+
+  fiber-phpt:
+    runs-on: ubuntu-latest
+    container:
+      image: ubuntu:26.04
+    env:
+      CCACHE_DIR: ${{ github.workspace }}/.ccache
+      CCACHE_MAXSIZE: 900M
+      PHPSRC: ${{ github.workspace }}/php-src-fiber
+      FPMNG_TLS: "1"
+      FPMNG_ACME: "1"
+      FPMNG_DEBUG_CLOCK: "1"
+    steps:
+      - name: git for actions/checkout
+        shell: bash
+        run: apt-get update -qq && apt-get install -y -qq --no-install-recommends git ca-certificates
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.ref || github.sha }}
+      - name: install the PHP 8.5 SDK, the from-source toolchain and the Turkish locale
+        shell: bash
+        env:
+          FPMNG_CI_EXTRA_PACKAGES: autoconf bison re2c pkg-config ccache locales patch
+        run: |
+          ./build/ci-install-deps.sh build
+          locale-gen tr_TR.UTF-8
+      - name: assert tr_TR.UTF-8 is present (issue #105)
+        run: locale -a | grep -i tr_TR
+
+      - name: restore the compiler cache
+        uses: actions/cache/restore@v6
+        with:
+          path: ${{ github.workspace }}/.ccache
+          key: ccache-fiber-${{ env.PHP_SRC_REF }}-${{ inputs.ref || github.sha }}
+          restore-keys: |
+            ccache-fiber-${{ env.PHP_SRC_REF }}-
+
+      # Layer 1 of the two-layer assertion: configure warns, it does not fail,
+      # on an unrecognised --enable flag, so the log is read, not the command
+      # line trusted (below). Layer 2 is assert-fiber-tests-ran.sh.
+      - name: php-src build tree with the fiber executor (async/build-tree.sh)
+        env:
+          CC: ccache gcc
+          CXX: ccache g++
+          WITH_ASYNC: ${{ inputs.with_async && '1' || '' }}
+        run: |
+          extra="--enable-fpmng-fiber"
+          if [ -n "$WITH_ASYNC" ]; then extra="$extra --enable-fpmng-async"; fi
+          # shellcheck disable=SC2086 -- the flag lists are meant to word-split
+          ./async/build-tree.sh "$PHPSRC" "$PHP_SRC_REPO" "$PHP_SRC_REF" $FPMNG_CONFIGURE_FLAGS $extra
+
+      - name: assert the executors are really in this build
+        env:
+          WITH_ASYNC: ${{ inputs.with_async && '1' || '' }}
+        run: |
+          grep -q "fiber-based multi-request executor in fpm-ng\.\.\. yes" "$PHPSRC/.fpmng-ci-configure.log"
+          if [ -n "$WITH_ASYNC" ]; then
+            grep -q "async multi-request executor in fpm-ng\.\.\. yes" "$PHPSRC/.fpmng-ci-configure.log"
+          fi
+
+      - name: build
+        env:
+          CC: ccache gcc
+          CXX: ccache g++
+        run: make -C "$PHPSRC" -j"$(nproc)" fpmng cli
+
+      - name: save the compiler cache
+        if: success()
+        uses: actions/cache/save@v6
+        with:
+          path: ${{ github.workspace }}/.ccache
+          key: ccache-fiber-${{ env.PHP_SRC_REF }}-${{ inputs.ref || github.sha }}
+
+      - name: embed the distribution payload (issue #171)
+        run: FPMNG_ACME=1 ./build/embed-payload.sh "$PHPSRC/sapi/fpmng/php-fpm-ng" "$PHPSRC/sapi/cli/php"
+
+      - name: run fpmng-owned .phpt tests on the fiber build
+        run: |
+          TEST_PHP_EXECUTABLE="$PHPSRC/sapi/cli/php" \
+          TEST_PHP_FPM_EXECUTABLE="$PHPSRC/sapi/fpmng/php-fpm-ng" \
+          TEST_FPM_TIMEOUT=120 \
+          ./build/run-fpmng-phpt.sh "$PHPSRC" "$PWD/fpmng-phpt-fiber-results"
+
+      # Not the acceptance criterion by itself: a run where every fiber test
+      # SKIPs passes the step above. Issue #97's script is the real gate.
+      - name: assert the fiber-gated tests actually ran (issue #97)
+        run: ./build/assert-fiber-tests-ran.sh "$PWD/fpmng-phpt-fiber-results"
+
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: fpmng-phpt-fiber-results
+          path: fpmng-phpt-fiber-results
+          retention-days: 7

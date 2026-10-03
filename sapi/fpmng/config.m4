@@ -662,43 +662,70 @@ if test "$PHP_FPMNG" != "no"; then
   dnl a file (e.g. events/devpoll.c).
   PHP_FPMNG_FILES="@FPMNG_SOURCES@"
 
-  dnl Multi-request executors (pool.executor = fiber / async): the flag NAMES
-  dnl are reserved here, and nothing else, the same pattern as
-  dnl --enable-fpmng-http2/--enable-fpmng-quic above. Issue #373 cut the
-  dnl executors themselves -- fpm_pool_fiber*.c, the fpm_pool_coop*.c layer
-  dnl fiber used, and fpm_pool_async.c -- out of this tree entirely, onto a
-  dnl long-lived branch named async, so that main's default build (which
-  dnl already carried none of their code, both flags being off by default)
-  dnl no longer carries their sources or CI cost either. Passing either flag
-  dnl is an ERROR, not a silent no-op, so an operator with an old build
-  dnl script learns where the executor went instead of getting a binary that
-  dnl quietly lacks it. build/test-reserved-configure-flags.sh asserts both
-  dnl refusals below, same as the http2/quic pair.
+  dnl Multi-request executors (pool.executor = fiber / async) are opt-in and
+  dnl OFF by default, so a default build carries none of their code. Each
+  dnl flag pulls in its own source list, substituted by async/prepare.sh from
+  dnl the same file the base list comes from (see NOTES: the source split).
+  dnl Branch async: build/prepare.sh is main's file and knows no fiber group,
+  dnl so it would list the fiber/coop/async sources in PHP_FPMNG_FILES, the
+  dnl always-built list. async/prepare.sh moves them out. Refuse the mistake
+  dnl here, where it is made, instead of shipping a default binary that
+  dnl carries the executors.
+  AS_CASE([$PHP_FPMNG_FILES],
+    [*fpm_pool_fiber*|*fpm_pool_coop*|*fpm_pool_async*],
+    [AC_MSG_ERROR([the always-built source list names fiber/coop/async files: this tree was prepared with build/prepare.sh. On branch async use async/prepare.sh (or async/build-tree.sh).])])
+
   PHP_ARG_ENABLE([fpmng-fiber],
     [whether to build the fiber-based multi-request executor in fpm-ng],
     [AS_HELP_STRING([--enable-fpmng-fiber],
-      [Build fpm-ng with pool.executor = fiber support -- MOVED to branch async])],
+      [Build fpm-ng with pool.executor = fiber support])],
     [no],
     [no])
-
-  AS_VAR_IF([PHP_FPMNG_FIBER], [no],, [
-    AC_MSG_ERROR([--enable-fpmng-fiber is a reserved flag name: the fiber executor is not in this tree. It lives on branch async of the repository, issue 373. Drop the flag, or build branch async.])
-  ])
 
   PHP_ARG_ENABLE([fpmng-async],
     [whether to build the async multi-request executor in fpm-ng],
     [AS_HELP_STRING([--enable-fpmng-async],
-      [Build fpm-ng with pool.executor = async support -- MOVED to branch async])],
+      [Build fpm-ng with pool.executor = async support])],
     [no],
     [no])
 
+  PHP_FPMNG_FIBER_FILES=""
+  AS_VAR_IF([PHP_FPMNG_FIBER], [no],, [
+    AC_DEFINE([HAVE_FPMNG_FIBER], [1],
+      [Define to 1 if fpm-ng has the fiber-based multi-request executor.])
+    PHP_FPMNG_FIBER_FILES="@FPMNG_FIBER_SOURCES@"
+  ])
+
+  dnl Fiber non-blocking TLS (patch 0007, HAVE_FPMNG_FIBER_TLS): needs
+  dnl ext/openssl compiled in AND linked into the fpmng binary. A shared
+  dnl openssl.so loads at runtime, after our check, so there is nothing to
+  dnl detect at build time — in that configuration the patch's ssl/tls
+  dnl transports stay upstream's (blocking). Caveat: sapi/fpmng/config.m4
+  dnl runs BEFORE ext/openssl/config0.m4 in configure, so
+  dnl PHP_OPENSSL/ext_shared do not exist yet; the raw autoconf option
+  dnl variable with_openssl is set during initial option parsing and IS
+  dnl available here.
+  AS_VAR_IF([PHP_FPMNG_FIBER], [no],, [
+    AS_CASE([$with_openssl], [no|""], [
+      dnl no ext/openssl at all: TLS transports do not exist; nothing to do
+    ], [shared], [
+      AC_MSG_WARN([pool.executor = fiber: ext/openssl is shared, the fiber TLS interception (patch 0007) is off; https:// will block the process])
+    ], [
+      AC_DEFINE([HAVE_FPMNG_FIBER_TLS], [1],
+        [Define to 1 if fpm-ng intercepts ssl/tls transports for the fiber executor (patch 0007).])
+    ])
+  ])
+
+  PHP_FPMNG_ASYNC_FILES=""
   AS_VAR_IF([PHP_FPMNG_ASYNC], [no],, [
-    AC_MSG_ERROR([--enable-fpmng-async is a reserved flag name: the async executor is not in this tree. It lives on branch async of the repository, issue 373. Drop the flag, or build branch async.])
+    AC_DEFINE([HAVE_FPMNG_ASYNC], [1],
+      [Define to 1 if fpm-ng has the async multi-request executor.])
+    PHP_FPMNG_ASYNC_FILES="@FPMNG_ASYNC_SOURCES@"
   ])
 
   PHP_SELECT_SAPI([fpmng],
     [program],
-    [$PHP_FPMNG_FILES $PHP_FPMNG_TRACE_FILES $PHP_FPMNG_SD_FILES $PHP_FPMNG_TLS_FILES $PHP_FPMNG_ACME_FILES],
+    [$PHP_FPMNG_FILES $PHP_FPMNG_TRACE_FILES $PHP_FPMNG_SD_FILES $PHP_FPMNG_FIBER_FILES $PHP_FPMNG_ASYNC_FILES $PHP_FPMNG_TLS_FILES $PHP_FPMNG_ACME_FILES],
     [-I$abs_srcdir/sapi/fpm -DZEND_ENABLE_STATIC_TSRMLS_CACHE=1])
 
   AS_CASE([$host_alias],

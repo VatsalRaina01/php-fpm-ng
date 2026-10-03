@@ -4635,6 +4635,11 @@ static int fpm_http_routes_build(struct fpm_worker_pool_s *wp, struct fpm_http_g
 			return -1;		/* unreachable: validate ran first */
 		}
 		capacity = target->config->pm_max_children > 0 ? (unsigned) target->config->pm_max_children : 1;
+		/* Branch async: a fiber/async target serves many connections per
+		 * child; see fpm_pool_type_s.requests_per_child. */
+		if (fpm_pool_type_of(target)->requests_per_child > 1) {
+			capacity *= fpm_pool_type_of(target)->requests_per_child;
+		}
 		if (fpm_http_target_init(&gw->targets[ti], gw, ti, target->config->name,
 				target->config->listen_address, transport, capacity) != 0) {
 			return -1;

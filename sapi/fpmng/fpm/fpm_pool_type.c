@@ -13,6 +13,7 @@
 #include "fpm_conf.h"
 #include "fpm_worker_pool.h"
 #include "fpm_pool_type.h"
+#include "fpm_pool_type_coop.h"
 #include "fpm_http.h"
 #include "fpm_http_direct.h"
 #include "fpm_http_direct_tls.h"
@@ -27,18 +28,14 @@
 
 /* http.* tunes the gateway, which starts only under pool.type = gateway (issue
  * #388, formerly pool.type = http) — on every other type these directives have
- * nothing to tune. worker.* applies only to
+ * nothing to tune. fiber.* applies only to pool.executor = fiber (the fiber
+ * executor's own rejected-directive list, fpm_pool_type_coop.c, does not
+ * include it). worker.* applies only to
  * pool.executor = worker (issue #331) -- fpm_http_direct_worker_accepts
- * further down carves its two directives back out on that one type.
- *
- * fiber.* had a matching entry here before issue #373: the fiber executor's
- * own two directives (fiber.revalidate_freq, fiber.isolate_statics) do not
- * exist on this branch at all any more (they lived on fpm_pool_coop_reval.c
- * / fpm_pool_coop_statics.c, both moved to branch async), so there is no
- * fiber.* namespace left to reject -- an unrecognised directive already
- * fails config parsing on its own, regardless of pool.type. */
+ * further down carves its two directives back out on that one type. */
 static const char *const fpm_pool_fastcgi_rejects[] = {
 	"http.",
+	"fiber.",
 	"worker.",
 	NULL
 };
@@ -269,15 +266,41 @@ static const struct fpm_pool_type_s fpm_http_direct_worker = {
 	.live_gauges                  = fpm_http_direct_worker_live_gauges,
 };
 
-/* Used to fill in executor .type pointers from the fiber/async structs, through
- * a lookup that lived in fpm_pool_type_coop.c. Issue #373 cut those structs out
- * to branch async. Issue #388 then retired pool.type = http, the last type that
- * offered a pool.executor list with the fiber/async entries, so there is no
- * list left to fill and no entry left to point at branch async. Kept as a no-op
- * call site rather than deleted so a future variant source has one designated
- * place to hook back in. */
+/* pool.executor on pool.type = fastcgi. The fiber/async children speak
+ * FastCGI on the pool's own listening socket, so since issue #388 split the
+ * proxy out into pool.type = gateway they sit on the plain FastCGI type: in
+ * front of a web server, or as an ordinary http.route[] target of a gateway.
+ * The .type pointers are filled in by fpm_pool_type_install_coop_variants()
+ * below; an executor built without its configure flag keeps its entry with
+ * .type NULL and .build_flag naming the flag. */
+static struct fpm_pool_executor_s fpm_fastcgi_executors[] = {
+	{ .name = "classic", .resolves_to_base = 1 },
+	{ .name = "fiber", .build_flag = "--enable-fpmng-fiber" },
+	{ .name = "async", .build_flag = "--enable-fpmng-async" },
+	{ .name = NULL }
+};
+
+/* Fills in the .type pointers above, once. Idempotent and safe to call from
+ * more than one entry point (fpm_pool_type_get() below calls it, and it is
+ * the first function every path into this file goes through) rather than
+ * requiring one designated startup call site -- see fpm_pool_type_coop.h for
+ * why this indirection exists at all. */
 static void fpm_pool_type_install_coop_variants(void)
 {
+	static int installed = 0;
+	struct fpm_pool_executor_s *e;
+
+	if (installed) {
+		return;
+	}
+	installed = 1;
+
+	for (e = fpm_fastcgi_executors; e->name; e++) {
+		if (e->resolves_to_base) {
+			continue;
+		}
+		e->type = fpm_pool_type_coop_variant("fastcgi", e->name);
+	}
 }
 
 /* http-direct ships its own child loop, so it offers its own executor instead
@@ -331,6 +354,7 @@ static const struct fpm_pool_type_s fpm_pool_types[] = {
 		.baseline_counter = "requests",
 		.operator_endpoint = 1,
 		.rejects         = fpm_pool_fastcgi_rejects,
+		.executors       = fpm_fastcgi_executors,
 	},
 	{
 		/* Issue #388: the gateway is the HTTP proxy that used to be welded
@@ -831,9 +855,15 @@ int fpm_pool_type_validate_executor(struct fpm_worker_pool_s *wp)
 	}
 
 	if (!e->resolves_to_base && !e->type) {
-		zlog(ZLOG_ALERT, "[pool %s] pool.executor = %s is not on this branch: it lives on "
-			"branch async of the repository",
-			wp->config->name, e->name);
+		if (e->build_flag) {
+			zlog(ZLOG_ALERT, "[pool %s] pool.executor = %s: this binary was built without "
+				"%s; rebuild with that flag to use this executor",
+				wp->config->name, e->name, e->build_flag);
+		} else {
+			zlog(ZLOG_ALERT, "[pool %s] pool.executor = %s is not on this branch: it lives on "
+				"branch async of the repository",
+				wp->config->name, e->name);
+		}
 		return -1;
 	}
 
