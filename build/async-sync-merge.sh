@@ -29,7 +29,8 @@
 #
 # Exit status:
 #   0  clean, published to the scratch ref; HEAD is the merge commit
-#   2  merge conflict; merge aborted, HEAD unchanged, nothing pushed
+#   2  merge conflict; merge aborted, HEAD unchanged, nothing pushed; the
+#      conflicted paths are listed one per line in <report-file>
 #   3  the merge would delete async paths; they are listed one per line in
 #      <report-file>, HEAD reset to its pre-merge commit, nothing pushed
 #   1  anything else (bad usage, fetch/push failure)
@@ -58,7 +59,12 @@ git fetch "$REMOTE" "$UPSTREAM"
 before=$(git rev-parse HEAD)
 : > "$REPORT"
 
-if ! git merge --no-edit "$REMOTE/$UPSTREAM"; then
+# --no-ff: always a real merge commit, never a fast-forward and never a
+# squash, so async's history keeps main's commits as ancestors.
+if ! git merge --no-ff --no-edit "$REMOTE/$UPSTREAM"; then
+	# The conflicted paths go into <report-file> before the abort throws the
+	# index state away; the workflow puts them in the issue it opens.
+	git diff --name-only --diff-filter=U > "$REPORT" || true
 	git merge --abort
 	echo "async-sync-merge.sh: merge of $REMOTE/$UPSTREAM conflicted; aborted" >&2
 	exit 2

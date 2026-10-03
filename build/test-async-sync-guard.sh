@@ -132,6 +132,7 @@ run_script "$W" origin main "$SCRATCH" "$TMP/report"
 [ "$rc" = 0 ] && ok "clean merge exits 0" || { bad "clean merge exited $rc"; cat "$TMP/script.log" >&2; }
 [ "$(remote_ref "$O" "$SCRATCH")" = "$(git -C "$W" rev-parse HEAD)" ] && ok "clean merge published to the scratch ref" || bad "scratch ref is not the merge commit"
 [ "$(remote_ref "$O" async)" = "$before" ] && ok "clean merge leaves async itself alone" || bad "script pushed async"
+[ "$(git -C "$W" rev-list --parents -n1 HEAD | wc -w | tr -d ' ')" = 3 ] && ok "clean merge is a real merge commit (two parents)" || bad "clean merge is not a two-parent merge commit"
 
 # b. conflict: aborted, nothing published.
 new_case conflict
@@ -144,6 +145,7 @@ run_script "$W" origin main "$SCRATCH" "$TMP/report"
 [ "$rc" = 2 ] && ok "conflict exits 2" || bad "conflict exited $rc"
 [ "$(git -C "$W" rev-parse HEAD)" = "$before" ] && [ -z "$(git -C "$W" status --porcelain)" ] && ok "conflict leaves the checkout at async, clean" || bad "conflict left the checkout changed"
 [ -z "$(remote_ref "$O" "$SCRATCH")" ] && ok "conflict publishes nothing" || bad "conflict pushed the scratch ref"
+[ "$(cat "$TMP/report")" = shared.txt ] && ok "conflict report lists the conflicted file" || bad "conflict report: $(tr '\n' ' ' < "$TMP/report")"
 
 # c. main deletes two shared files async never touched (0006 and fiber.c):
 #    refused and both listed; allow-listing only one still refuses and lists

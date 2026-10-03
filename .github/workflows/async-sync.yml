@@ -1,30 +1,22 @@
 name: async-sync
 
-# Issue #374 (part of the #370 epic). Lives ONLY on branch `async` -- main's
-# CI does not gain a job from this file, because main never checks this file
-# out at all.
+# Issues #374, #520, #528, #620. Lives on BOTH branches, with two different
+# bodies: main carries a stub (GitHub only dispatches a workflow file that
+# exists on the default branch), this is the real one, run with --ref async.
 #
-# "Merged from main periodically" is the sentence every long-lived branch
-# dies of: without a machine doing it, the branch drifts until the merge is a
-# rewrite, and the fiber/async executors' tests (cut off main by #373) stop
-# running the day nobody remembers to pull. This also gives
-# `pool.executor = async` its first CI coverage ever -- no cell anywhere,
-# including this repo's own build-matrix.yml, builds --enable-fpmng-async
-# (issue #87).
+# NO schedule: here. A `schedule:` trigger is read from the default branch
+# only, so one in this file on async would never fire. The clock is main's
+# async-sync-trigger.yml, which dispatches this workflow on ref async. This
+# file therefore has workflow_dispatch only.
 #
-# Weekly is enough: the branch has no traffic of its own to protect, and
-# per-PR-to-main cost is explicitly out of scope (#374) -- the whole point of
-# cutting the branch was that main's PRs stop paying for a second php-src
-# tree. Follows the same schedule pattern as .github/workflows/ci-image.yml
-# (issue #240/#393): a nightly/weekly cron plus workflow_dispatch, because
-# drift nobody triggers by hand has to be triggered by the clock.
+# What a run does: merge origin/main into async with a real merge commit (never
+# a squash, never a rebase), refuse a merge that deletes async-only paths
+# (#520), build and test the merge commit through async-fiber.yml (the fiber
+# executor from the php-src flow, async executor included), and only then push
+# async. On a conflict, a deleting merge, a failed build or a rejected push it
+# opens or updates one issue (build/ci-report-async-sync-failure.sh) that names
+# the conflicted files.
 on:
-  schedule:
-    # 41 minutes past, not on the hour, for the same reason ci-image.yml's
-    # 03:17 is: round numbers are when GitHub's scheduler is congested.
-    # Sunday, so a failure issue is sitting there Monday morning rather than
-    # landing mid-week.
-    - cron: "41 4 * * 0"
   workflow_dispatch:
     inputs:
       allow_deletions:
@@ -41,13 +33,6 @@ permissions:
   issues: write
 
 env:
-  # Same pin and same flag string as build-matrix.yml's fpmng-phpt-fiber cell
-  # (build-matrix.yml:183-184,223): the comparison this build is worth making
-  # only holds if it cannot drift from the recipe that cell used before #373
-  # cut it off main.
-  PHP_SRC_REPO: https://github.com/php/php-src.git
-  PHP_SRC_REF: php-8.5.9
-  FPMNG_CONFIGURE_FLAGS: --disable-all --enable-fpmng --enable-fpmng-tls --enable-fpmng-acme --enable-session --with-openssl --enable-fpmng-debug-clock
   # A scratch ref that only this workflow touches, so the merge commit exists
   # somewhere between the jobs below without either job needing to reconstruct
   # git history from an artifact. Force-pushed at the start of every run, and
@@ -83,7 +68,7 @@ jobs:
       - name: merge origin/main into async and publish the scratch ref
         id: merge
         env:
-          # workflow_dispatch only; empty on the schedule. Passed through the
+          # workflow_dispatch only; empty when not given. Passed through the
           # environment, never interpolated into the script.
           ALLOW_DELETIONS: ${{ inputs.allow_deletions }}
         run: |
@@ -110,9 +95,13 @@ jobs:
           chmod +x build/ci-report-async-sync-failure.sh
           {
             echo "\`git merge origin/main\` into \`async\` conflicted, so this"
-            echo "scheduled run did not push anything. #371's seam between"
-            echo "main and the branch has probably been broken by a change on"
-            echo "main -- resolve by hand:"
+            echo "run did not push anything. Conflicted files:"
+            echo
+            echo '```'
+            cat /tmp/deleted-paths.txt
+            echo '```'
+            echo
+            echo "Resolve by hand, with a merge commit (no rebase, no squash):"
             echo
             echo '```'
             echo "git fetch origin main"
@@ -163,104 +152,16 @@ jobs:
     outputs:
       sha: ${{ steps.sha.outputs.sha }}
 
-  # Step 2+3 (issue #374): one php-src tree, both flags on, own ccache prefix,
-  # mirrors the fpmng-phpt-fiber cell as it stood in build-matrix.yml before
-  # #373 (build-matrix.yml:637-763 at the pre-cut commit), extended from
-  # --enable-fpmng-fiber alone to both flags.
+  # Step 2+3: build and test the merge commit. One definition of the fiber
+  # build, shared with the PR checks: .github/workflows/async-fiber.yml.
   build-and-test:
     needs: merge
-    runs-on: ubuntu-latest
-    container:
-      image: ghcr.io/crazy-goat/php-fpm-ng-ci:latest
-      credentials:
-        username: ${{ github.actor }}
-        password: ${{ secrets.GITHUB_TOKEN }}
-      # uid 1001, not root: as root php-fpm refuses to start, so the suite
-      # reports PASS=0 with everything SKIPped and the job still looks green.
-      # Same note as fpmng-phpt and fpmng-phpt-fiber in build-matrix.yml.
-      options: --user 1001:1001
-    env:
-      CCACHE_DIR: ${{ github.workspace }}/.ccache
-      CCACHE_MAXSIZE: 900M
-      # Its own tree and its own cache prefix: this configure line (fiber AND
-      # async both on) is not the same as either build-matrix.yml cell, so it
-      # cannot share objects or a cache entry with them.
-      PHPSRC: ${{ github.workspace }}/php-src-async-sync
-    steps:
-      - uses: actions/checkout@v7
-        with:
-          ref: ${{ needs.merge.outputs.sha }}
-
-      - name: restore the compiler cache
-        uses: actions/cache/restore@v6
-        with:
-          path: ${{ github.workspace }}/.ccache
-          key: ccache-async-sync-${{ env.PHP_SRC_REF }}-${{ needs.merge.outputs.sha }}
-          restore-keys: |
-            ccache-async-sync-${{ env.PHP_SRC_REF }}-
-
-      - name: assert tr_TR.UTF-8 is present (issue #105)
-        run: locale -a | grep -i tr_TR
-
-      - name: php-src build tree with the fiber AND async executors
-        env:
-          CC: ccache gcc
-          CXX: ccache g++
-        run: |
-          # shellcheck disable=SC2086 -- the flag list is meant to word-split
-          ( set +e; ./build/ci-build-tree.sh "$PHPSRC" "$PHP_SRC_REPO" "$PHP_SRC_REF" $FPMNG_CONFIGURE_FLAGS --enable-fpmng-fiber --enable-fpmng-async 2>&1; echo "$?" > tree.rc ) | tee tree.log
-          exit "$(cat tree.rc)"
-
-      - name: assert both executors are really in this build
-        # configure warns, it does not fail, on an unrecognised --enable flag
-        # -- so read the log rather than trust the command line. Extends the
-        # single-line assertion build-matrix.yml's fpmng-phpt-fiber cell made
-        # (build-matrix.yml:722) to both flags, per #374.
-        run: |
-          grep -q "fiber-based multi-request executor in fpm-ng\.\.\. yes" "$PHPSRC/.fpmng-ci-configure.log"
-          grep -q "async multi-request executor in fpm-ng\.\.\. yes" "$PHPSRC/.fpmng-ci-configure.log"
-
-      - name: build
-        run: |
-          touch "$PHPSRC/.fpmng-ci-dirty"
-          ( set +e; make -C "$PHPSRC" -j"$(nproc)" fpmng cli 2>&1; echo "$?" > make.rc ) | tee make.log
-          if [ "$(cat make.rc)" = 0 ]; then rm -f "$PHPSRC/.fpmng-ci-dirty"; fi
-          exit "$(cat make.rc)"
-
-      - name: save the compiler cache
-        if: success()
-        uses: actions/cache/save@v6
-        with:
-          path: ${{ github.workspace }}/.ccache
-          key: ccache-async-sync-${{ env.PHP_SRC_REF }}-${{ needs.merge.outputs.sha }}
-
-      - name: embed the distribution payload (issue #171)
-        run: |
-          chmod +x build/embed-payload.sh
-          FPMNG_ACME=1 ./build/embed-payload.sh "$PHPSRC/sapi/fpmng/php-fpm-ng" "$PHPSRC/sapi/cli/php"
-
-      - name: run fpmng-owned .phpt tests (build/run-fpmng-phpt.sh)
-        id: phpt
-        run: |
-          chmod +x build/run-fpmng-phpt.sh
-          TEST_PHP_EXECUTABLE="$PHPSRC/sapi/cli/php" \
-          TEST_PHP_FPM_EXECUTABLE="$PHPSRC/sapi/fpmng/php-fpm-ng" \
-          TEST_FPM_TIMEOUT=120 \
-          ./build/run-fpmng-phpt.sh "$PHPSRC" "$PWD/fpmng-phpt-async-sync-results"
-
-      # Not the acceptance criterion by itself: a run where every fiber test
-      # SKIPs passes the step above. Issue #97's script is the real gate.
-      - name: assert the fiber-gated tests actually ran (issue #97)
-        run: |
-          chmod +x build/assert-fiber-tests-ran.sh
-          ./build/assert-fiber-tests-ran.sh "$PWD/fpmng-phpt-async-sync-results"
-
-      - uses: actions/upload-artifact@v7
-        if: always()
-        with:
-          name: async-sync-phpt-results
-          path: fpmng-phpt-async-sync-results
-          retention-days: 7
+    uses: ./.github/workflows/async-fiber.yml
+    with:
+      ref: ${{ needs.merge.outputs.sha }}
+      with_async: true
+    permissions:
+      contents: read
 
   # Step 4 (issue #374): push on full success; report and clean up on
   # failure. `if: always()` so this runs even when build-and-test failed --
@@ -278,9 +179,51 @@ jobs:
           ref: ${{ env.SCRATCH_REF }}
           fetch-depth: 0
 
+      # A plain (non-force) push: if async moved while this run built, or a
+      # ruleset or the token's missing `workflow` scope refuses it, the push is
+      # rejected and the next step says so in an issue instead of leaving a red
+      # run nobody opens.
       - name: push the merge commit to async
+        id: push
         if: needs.build-and-test.result == 'success'
-        run: git push origin "HEAD:refs/heads/async"
+        run: |
+          rc=0
+          git push origin "HEAD:refs/heads/async" 2> /tmp/push.err || rc=$?
+          cat /tmp/push.err >&2
+          if [ "$rc" -ne 0 ]; then
+            echo "rejected=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: report the rejected push
+        if: steps.push.outputs.rejected == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          chmod +x build/ci-report-async-sync-failure.sh
+          git fetch origin main async
+          {
+            echo "The merge of \`origin/main\` into \`async\` built and passed"
+            echo "(merge commit \`${{ needs.merge.outputs.sha }}\`), but pushing it to"
+            echo "\`async\` was rejected. Either \`async\` moved during the run, or a"
+            echo "ruleset or the token refused it (a merge that touches"
+            echo "\`.github/workflows/\` needs a token with the \`workflow\` scope)."
+            echo
+            echo "Files changed by this merge in \`.github/workflows/\`:"
+            echo '```'
+            git diff --name-only "origin/async" HEAD -- .github/workflows || true
+            echo '```'
+            echo
+            echo "Git said:"
+            echo '```'
+            cat /tmp/push.err
+            echo '```'
+            echo
+            echo "Merge by hand (no rebase, no squash) or re-run the workflow."
+            echo
+            echo "Run: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+          } > /tmp/push-body.md
+          ./build/ci-report-async-sync-failure.sh "push rejected" /tmp/push-body.md
+          exit 1
 
       - name: report the test/build failure (issue #374 step 4)
         if: needs.build-and-test.result != 'success'
@@ -289,7 +232,7 @@ jobs:
         run: |
           chmod +x build/ci-report-async-sync-failure.sh
           {
-            echo "The weekly merge from main went through cleanly (merge"
+            echo "The merge from main went through cleanly (merge"
             echo "commit \`${{ needs.merge.outputs.sha }}\`), but the"
             echo "\`--enable-fpmng-fiber --enable-fpmng-async\` build or its"
             echo "phpt run failed, so nothing was pushed to \`async\`."
