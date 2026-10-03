@@ -11,6 +11,9 @@ v0.5.0, v0.5.1 and v0.11.0 have no GitHub release.
 
 ## [Unreleased]
 
+### Fixed
+- Gateway: a client connection was time-limited only until its first request was read. Now `http.read_timeout` also bounds every later request on a keep-alive connection (from its first byte), the new `http.keepalive_timeout` (default 60000 ms, 0 = unlimited) closes an idle keep-alive connection, and the new `http.write_timeout` (default 30000 ms, 0 = unlimited) closes a client that stalls a pending response write. `http.plain_listen` now has a first-request read deadline and the same keep-alive limit. `http.max_connections` and `http.max_connections_per_client` are refused on a gateway (they were silently ignored); both new directives are refused on `http-direct`. Docs corrected: `http.read_timeout` is not libevent's `evhttp_set_timeout_tv()` and `http.idle_timeout` is not a client timeout (#593).
+
 ### Documentation
 - Document that the default operator listener `127.0.0.1:9253` is global to the host: a second master with gateway (or any operator-page) pools on the default fails to bind, and how to avoid it with `operator.*_listen` or `operator.status|metrics = off` (#561).
 
