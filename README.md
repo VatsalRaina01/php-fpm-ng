@@ -1,8 +1,16 @@
 # php-fpm-ng
 
-POC. PHP-FPM with additional operating modes: HTTP, supervisor, cron and
-metrics — so that the container image holds one binary and the application
-code, without nginx, without supervisord and without a system cron.
+PHP-FPM with additional operating modes: HTTP, supervisor, cron and metrics —
+so that the container image holds one binary and the application code, without
+nginx, without supervisord and without a system cron. Which parts are supported
+and which are beta is the table under [Support tiers](#support-tiers).
+
+**New here?** [`docs/guides/getting-started.md`](docs/guides/getting-started.md) goes from the
+`.deb` to a working combined configuration. Coming from something else:
+[php-fpm + nginx](docs/guides/migrate-php-fpm-nginx.md),
+[NGINX Unit](docs/guides/migrate-nginx-unit.md),
+[supervisord + cron](docs/guides/migrate-supervisord-cron.md). Symfony and Laravel:
+[`docs/guides/framework-recipes.md`](docs/guides/framework-recipes.md).
 
 **Target audience: small projects.** One VPS, one instance, typically an
 application plus one or two consumers plus a few cron jobs. Not k8s.
@@ -13,14 +21,12 @@ whole thing and one binary to scan.
 
 ## State as of today
 
-The HTTP gateway POC on libevent works, as a branch in php-src:
-https://github.com/s2x/php-src/tree/fpm-http-poc
-
-Historical measurement (2026-09-07, php-src tree build; the static musl
-artefact it describes was retired from `main` in #424): a full static
-`-static-pie` build on musl ran in a bare `FROM scratch` as PID 1 and answered
-HTTP 200. Current builds are dynamic only (Debian/Ubuntu glibc and Alpine musl,
-PHP 8.5 NTS) against the distribution's PHP SDK; see `docs/install.md`.
+`sapi/fpmng` is a separate SAPI, built against the distribution's PHP 8.5 SDK
+(NTS, dynamic, Debian/Ubuntu glibc and Alpine musl; see `docs/install.md`). The
+HTTP gateway on libevent started as a branch in php-src
+(https://github.com/s2x/php-src/tree/fpm-http-poc); `main` carries no php-src
+patch. The static musl artefact of the early measurements was retired from
+`main` in #424.
 
 Current state of `sapi/fpmng`:
 
@@ -147,12 +153,12 @@ is the one name that stays, and only on `pool.type = fastcgi`, where it keeps
 its upstream meaning. See
 [`docs/operator-endpoint.md`](docs/operator-endpoint.md).
 
-## Plan
+## Documentation map
 
-Eventually a **separate SAPI** in `sapi/fpmng/`, not a fork of php-src —
-`configure.ac` finds directories under `sapi/` by glob, so no existing file
-needs to be touched. Details, decisions, measured numbers and the list of
-known issues: [`docs/NOTES.md`](docs/NOTES.md).
+php-fpm-ng is a **separate SAPI** in `sapi/fpmng/`, not a fork of php-src:
+`configure.ac` finds directories under `sapi/` by glob, so no existing file needs
+to be touched. Details, decisions, measured numbers and the list of known
+issues: [`docs/NOTES.md`](docs/NOTES.md).
 
 `pool.type = cron` directives (`cron.schedule`, `cron.timezone`, `cron.log`,
 ...) are documented for operators in [`docs/cron.md`](docs/cron.md).
@@ -201,57 +207,27 @@ in the `php-fpm-ng-tls` package (issue #281);
 a build without it carries neither the challenge state nor the client, and
 refuses an ACME `cron.script` at startup.
 
-## Experimental direct HTTP
+## Direct HTTP
 
 `pool.type = http-direct` runs HTTP and PHP in the same FPM child, without the
-FastCGI gateway hop. It supports **classic execution and `pm = static` only**.
-The FPM master still manages the workers. This is a buffered, front-controller-only
-POC, not a production frontend; configuration, limits, and benchmark methodology:
+FastCGI gateway hop. It is **supported with the default `classic` executor** and
+beta with `pool.executor = worker` (see the tier table). It supports **`pm =
+static` only**, and responses are buffered by default (`http.stream = yes`
+streams them). The FPM master still manages the workers. A pool that
+needs routing to several targets, or TLS, uses the gateway in front instead.
+Configuration, limits, and benchmark methodology:
 [`docs/http-direct.md`](docs/http-direct.md).
 
-## Framework support on `pool.executor = fiber`
+## Framework support
 
-The `fiber` executor runs several requests concurrently in one worker process,
-which only helps a framework that keeps no state outside what is isolated per
-request. Full measurements, root causes and required configuration:
-[`docs/frameworks.md`](docs/frameworks.md).
-
-- **Symfony — supported, with required configuration.** Verified only on
-  **Symfony 8.1.6** (skeleton + orm-pack + security-bundle, Doctrine ORM,
-  sessions and cache on Redis). Requires `env[FPMNG_SHARED_INCLUDES] = 1` and a
-  hand-written `public/index.php` without `symfony/runtime`
-  ([#78](https://github.com/crazy-goat/php-fpm-ng/issues/78)); needs
-  **no** `fiber.isolate_statics` entries. Covered by an automated probe
-  (`tests/frameworks/symfony/`): sessions, the stateful `http_basic` firewall,
-  Doctrine identity, Twig, form validation, synchronous Messenger dispatch,
-  `APP_ENV=prod`, `pm.max_children > 1`, `fiber.revalidate_freq` deploys, and a
-  200-request RSS run all pass. Other Symfony major versions (6.4 LTS, 7.x,
-  other 8.x releases) are **not verified**: the `symfony/runtime` interaction
-  that forces the hand-written `index.php` is version-sensitive and must be
-  re-checked before extending this claim to another version.
-- **Laravel — supported for the measured surface, with a required statics
-  list.** Verified on **Laravel 13.30.1**. Needs
-  `env[FPMNG_SHARED_INCLUDES] = 1` and `fiber.isolate_statics` naming the
-  framework's request-scoped class statics (`Container::instance`,
-  `Facade::app`, `Facade::resolvedInstance`, `Model::resolver`,
-  `Model::dispatcher`, `Model::globalScopes`) — the exact versioned snippet
-  and where each entry came from are in `docs/frameworks.md`, section
-  "Laravel: the versioned configuration snippet and how it is verified".
-  **Warning: an incomplete list does not crash — Laravel returns HTTP 200
-  while silently serving one request's session, identity or query results to
-  another, and logs nothing.** The list is verified by an automated audit
-  (`/statics-audit` in `tests/frameworks/laravel/`) that snapshots every
-  static property across a suspension, plus data-asserting scenarios
-  covering sessions, auth, Eloquent, rate limiting, mail, Blade composers,
-  route model binding and per-request observers/global scopes. The list
-  must be re-verified for every Laravel minor version. Covered by
-  `tests/frameworks/laravel/`.
-- **Slim 4 — supported for the measured surface.** Verified on **Slim
-  4.15.3** with `slim/psr7`; needs `env[FPMNG_SHARED_INCLUDES] = 1` and no
-  `fiber.isolate_statics` entries. Covered by `tests/frameworks/slim4/`.
-
-None of this applies to the default `classic` executor, which runs one request
-at a time per worker like upstream FPM.
+`main` ships the `classic` executor, which runs one request at a time per worker
+like upstream FPM, and the beta `worker` executor on `pool.type = http-direct`,
+for long-lived connections: one worker holds several requests at once. See
+[`docs/frameworks.md`](docs/frameworks.md). CI runs a Slim 4 smoke test on `gateway`+`fastcgi` and on
+`http-direct` classic (`tests/frameworks/`).
+The framework measurements for `pool.executor = fiber` (Symfony, Laravel, Slim 4)
+belong to the `fiber` executor and live on branch `async`
+(`async/docs/frameworks-fiber.md`).
 
 ## Recommended pool configuration for lightweight endpoints
 
@@ -294,7 +270,7 @@ Work is tracked in **GitHub Issues**, not in the tree. `gh issue list` shows
 what is open; labels carry type (`bug`, `enhancement`, `spike`, `refactor`,
 `decision`, ...), area (`area:http-direct`, `area:tls`, `area:fiber`, ...) and
 priority. Everything under `track:nice-to-have` applies only to
-`pool.executor = fiber`, which is behind a build flag that is off by default.
+`pool.executor = fiber`, which is not on `main` (branch `async`).
 
 Before touching anything, read [`AGENTS.md`](AGENTS.md): the English-only
 rule, the architecture contract (new behaviour in new files under
