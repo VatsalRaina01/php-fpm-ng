@@ -235,6 +235,8 @@ off_reason() {
   USE_LOCKING)                  echo "fastcgi.c's accept() lock for platforms without a thread-safe accept(); never on Linux" ;;
   PHP_FPM_ZLOG_TRACE)           echo "scoreboard debug tracing, a developer switch upstream never enables" ;;
   FPMNG_BUILT_PHP_VERSION|FPMNG_BUILT_PHP_VERSION_ID) echo "test seam of build/libphp/libphp_abi_check.c, set only through EXTRA_CFLAGS" ;;
+  HAVE_FPMNG_FIBER|HAVE_FPMNG_FIBER_TLS|HAVE_FPMNG_ASYNC)
+                                echo "branch async: the executors need patches 0007/0008 inside libphp, which is the distribution's file; from-source builds only (async/README.md)" ;;
   *) return 1 ;;
   esac
 }
@@ -340,6 +342,12 @@ sources() {
     case "$(basename "$f")" in
       fpm_tls_*) [ "$FPMNG_TLS" = 1 ] || continue ;;
       fpm_acme_*) [ "$FPMNG_ACME" = 1 ] || continue ;;
+      # Branch async: the fiber/coop/async executors are never part of this
+      # build. They need patches 0007/0008 inside libphp, which is the
+      # distribution's file, so they are built only by the from-source flow
+      # (async/build-tree.sh). Same prefixes as async/prepare.sh. The tree
+      # still carries their headers (fpm_pool_type_coop.c includes them).
+      fpm_pool_fiber*|fpm_pool_coop*|fpm_pool_async*) continue ;;
     esac
     echo "$TREE/sapi/fpmng/$f"
   done
@@ -497,6 +505,12 @@ if [ "$FPMNG_DEBUG_CLOCK" = 1 ]; then
 else
   refute_symbol fpm_debug_clock_now "the test-suite clock is in a build that did not ask for it (issue #396)"
 fi
+
+# Branch async: none of the fiber/coop/async executor code may be in this
+# binary, whichever way the source list above was filtered. Prefix-based, so a
+# new executor file that leaked in is caught without anyone listing it.
+"$REPO/async/check-no-fiber-symbols.sh" "$BIN" ||
+  fail "the default SDK binary carries fiber/coop/async executor code (async/README.md)"
 
 # --- assert what is accepted, and that the retired name is refused -------------
 # Issue #214, re-aimed by #388 and #420. No type keys on a build capability any
