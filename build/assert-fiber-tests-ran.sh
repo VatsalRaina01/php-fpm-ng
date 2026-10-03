@@ -26,7 +26,7 @@ TSV="$RESULTS/results.tsv"
 }
 
 # The ten named in issue #97 plus later additions (#531:
-# fpmng-fiber-disable-interceptions), all gated on "php-fpm-ng was not built with
+# fpmng-fiber-disable-interceptions; #620: fpmng-tier-experimental), all gated on "php-fpm-ng was not built with
 # --enable-fpmng-fiber" or on an extension this cell's configure line
 # provides. Listed literally, not globbed on 'fiber': two of them
 # (fpmng-reload-listening-flags, fpmng-unrelated-listening-flags) do not carry
@@ -42,6 +42,7 @@ fpmng-fiber-stream-select.phpt
 fpmng-fiber-tls-concurrency.phpt
 fpmng-pool-type-fiber-matrix.phpt
 fpmng-reload-listening-flags.phpt
+fpmng-tier-experimental.phpt
 fpmng-unrelated-listening-flags.phpt"
 
 rc=0

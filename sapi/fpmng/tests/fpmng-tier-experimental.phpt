@@ -16,7 +16,7 @@ require_once "tester.inc";
 
 /* Issue #295. The third tier needs a build flag to reach, so this is a second
  * file rather than a third pool in fpmng-tier-announce.phpt: that one runs
- * everywhere and this one runs in the fiber cell (build-matrix.yml,
+ * everywhere and this one runs in the fiber cell (async-fiber.yml,
  * fpmng-phpt-fiber).
  *
  * The level is the assertion. #269 chose WARNING for experimental against
