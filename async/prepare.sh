@@ -42,6 +42,8 @@ export FIBER_LIST ASYNC_LIST
 awk '
   /^[[:space:]]+fpm\/fpm_pool_(fiber|coop|async)[A-Za-z0-9_]*\.c \\$/ { next }
   {
+    # the base list from build/prepare.sh is written on one line, so drop the tokens too.
+    gsub(/fpm\/fpm_pool_(fiber|coop|async)[A-Za-z0-9_]*\.c[ ]*/, "");
     gsub(/@FPMNG_FIBER_SOURCES@/, "\n" ENVIRON["FIBER_LIST"] "\n  ");
     gsub(/@FPMNG_ASYNC_SOURCES@/, "\n" ENVIRON["ASYNC_LIST"] "\n  ");
     print
