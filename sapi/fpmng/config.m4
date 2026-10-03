@@ -666,6 +666,15 @@ if test "$PHP_FPMNG" != "no"; then
   dnl OFF by default, so a default build carries none of their code. Each
   dnl flag pulls in its own source list, substituted by build/prepare.sh from
   dnl the same file the base list comes from (see NOTES: the source split).
+  dnl Branch async: build/prepare.sh is main's file and knows no fiber group,
+  dnl so it would list the fiber/coop/async sources in PHP_FPMNG_FILES, the
+  dnl always-built list. async/prepare.sh moves them out. Refuse the mistake
+  dnl here, where it is made, instead of shipping a default binary that
+  dnl carries the executors.
+  AS_CASE([$PHP_FPMNG_FILES],
+    [*fpm_pool_fiber*|*fpm_pool_coop*|*fpm_pool_async*],
+    [AC_MSG_ERROR([the always-built source list names fiber/coop/async files: this tree was prepared with build/prepare.sh. On branch async use async/prepare.sh (or async/build-tree.sh).])])
+
   PHP_ARG_ENABLE([fpmng-fiber],
     [whether to build the fiber-based multi-request executor in fpm-ng],
     [AS_HELP_STRING([--enable-fpmng-fiber],
