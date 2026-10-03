@@ -30,8 +30,10 @@ FIBER_SOURCES=$(echo "$ALL" | grep -E "$FIBER_RE" || true)
 ASYNC_SOURCES=$(echo "$ALL" | grep -E "$ASYNC_RE" || true)
 [ -n "$FIBER_SOURCES" ] || { echo "async/prepare.sh: no fiber/coop files found" >&2; exit 1; }
 [ -n "$ASYNC_SOURCES" ] || { echo "async/prepare.sh: fpm_pool_async.c not found" >&2; exit 1; }
-grep -q '@FPMNG_FIBER_SOURCES@' "$CM4" && grep -q '@FPMNG_ASYNC_SOURCES@' "$CM4" ||
-  { echo "async/prepare.sh: $CM4 has no fiber/async placeholders (build/prepare.sh already substituted or config.m4 changed)" >&2; exit 1; }
+if ! grep -q '@FPMNG_FIBER_SOURCES@' "$CM4" || ! grep -q '@FPMNG_ASYNC_SOURCES@' "$CM4"; then
+  echo "async/prepare.sh: $CM4 has no fiber/async placeholders (build/prepare.sh already substituted or config.m4 changed)" >&2
+  exit 1
+fi
 
 list() { echo "$1" | sed 's/$/ \\/' | sed 's/^/    /'; }
 # Through the environment, not awk -v: -v would interpret the backslashes.

@@ -174,6 +174,16 @@ git -C "$S" push -q "$O" main
 run_script "$W" origin main "$SCRATCH" "$TMP/report"
 [ "$rc" = 3 ] && [ "$(cat "$TMP/report")" = fiber.c ] && [ -e "$W/fiber.c" ] && ok "fast-forward deletion refused" || bad "fast-forward deletion: rc=$rc"
 
+# e. a clean merge whose scratch push the remote refuses (the token-scope case):
+#    its own exit code, with git's message in the report, for the issue.
+new_case scratch-refused
+git -C "$S" checkout -q main; echo more >> "$S/shared.txt"; seed_commit main-edits
+git -C "$S" push -q "$O" main
+printf '#!/bin/sh\necho "refusing to update workflow files" >&2\nexit 1\n' > "$O/hooks/pre-receive"
+chmod +x "$O/hooks/pre-receive"
+run_script "$W" origin main "$SCRATCH" "$TMP/report"
+[ "$rc" = 4 ] && grep -q "refusing to update workflow files" "$TMP/report" && ok "refused scratch push exits 4 with git's message in the report" || bad "refused scratch push: rc=$rc"
+
 if [ "$fail" = 0 ]; then
 	echo "test-async-sync-guard.sh: all checks passed"
 else

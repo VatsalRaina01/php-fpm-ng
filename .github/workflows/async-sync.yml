@@ -11,11 +11,15 @@ name: async-sync
 #
 # What a run does: merge origin/main into async with a real merge commit (never
 # a squash, never a rebase), refuse a merge that deletes async-only paths
-# (#520), build and test the merge commit through async-fiber.yml (the fiber
-# executor from the php-src flow, async executor included), and only then push
+# (#520), build and test the merge commit through async-fiber.yml (main's
+# contract: pristine vendor check and the default SDK build without executor
+# symbols; and the fiber executor from the php-src flow, async executor
+# included), and only then push
 # async. On a conflict, a deleting merge, a failed build or a rejected push it
 # opens or updates one issue (build/ci-report-async-sync-failure.sh) that names
-# the conflicted files.
+# the conflicted files. The merge commit must reach async as a fast-forward
+# push (this workflow does that); a hand merge must never be squash-merged
+# through a PR, or main stops being an ancestor of async.
 on:
   workflow_dispatch:
     inputs:
@@ -84,6 +88,7 @@ jobs:
             0) echo "result=clean" >> "$GITHUB_OUTPUT" ;;
             2) echo "result=conflict" >> "$GITHUB_OUTPUT" ;;
             3) echo "result=deletes" >> "$GITHUB_OUTPUT" ;;
+            4) echo "result=scratch-push" >> "$GITHUB_OUTPUT" ;;
             *) exit "$rc" ;;
           esac
 
@@ -114,6 +119,36 @@ jobs:
           } > /tmp/conflict-body.md
           ./build/ci-report-async-sync-failure.sh "merge conflict" /tmp/conflict-body.md
 
+      - name: report the scratch push failure
+        if: steps.merge.outputs.result == 'scratch-push'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          chmod +x build/ci-report-async-sync-failure.sh
+          git fetch origin async
+          {
+            echo "The merge of \`origin/main\` into \`async\` was clean, but"
+            echo "pushing the merge commit to the scratch ref \`$SCRATCH_REF\`"
+            echo "was refused, so nothing was built or pushed. This is the first"
+            echo "push that carries main's changes; a merge that touches"
+            echo "\`.github/workflows/\` needs a token with the \`workflow\` scope."
+            echo
+            echo "Files this merge changes in \`.github/workflows/\`:"
+            echo '```'
+            git diff --name-only origin/async HEAD -- .github/workflows || true
+            echo '```'
+            echo
+            echo "Git said:"
+            echo '```'
+            cat /tmp/deleted-paths.txt
+            echo '```'
+            echo
+            echo "Merge by hand (no rebase, no squash) or give the workflow a token that may push workflow files."
+            echo
+            echo "Run: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+          } > /tmp/scratch-body.md
+          ./build/ci-report-async-sync-failure.sh "scratch push rejected" /tmp/scratch-body.md
+
       - name: report the deletion (issue #520)
         if: steps.merge.outputs.result == 'deletes'
         env:
@@ -140,9 +175,10 @@ jobs:
           } > /tmp/deletion-body.md
           ./build/ci-report-async-sync-failure.sh "merge would delete async paths" /tmp/deletion-body.md
 
-      # Stop here on a conflict or a deletion: the report above is the point
-      # of this run, and there is nothing for the build/test job to build.
-      - name: fail the job on conflict or deletion
+      # Stop here on a conflict, a deletion or a refused scratch push: the
+      # report above is the point of this run, and there is nothing for the
+      # build/test job to build.
+      - name: fail the job on conflict, deletion or scratch push failure
         if: steps.merge.outputs.result != 'clean'
         run: exit 1
 
@@ -234,7 +270,8 @@ jobs:
           {
             echo "The merge from main went through cleanly (merge"
             echo "commit \`${{ needs.merge.outputs.sha }}\`), but the"
-            echo "\`--enable-fpmng-fiber --enable-fpmng-async\` build or its"
+            echo "main's SDK contract check (vendor check, default build without"
+            echo "executor symbols) or the \`--enable-fpmng-fiber --enable-fpmng-async\` build or its"
             echo "phpt run failed, so nothing was pushed to \`async\`."
             echo
             echo "Build/test job: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"

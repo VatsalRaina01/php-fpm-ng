@@ -58,6 +58,37 @@ jobs:
         shell: bash
         run: ./build/test-fiber-io-seam.sh
 
+  # Main's build contract on this branch (review of #620): build-matrix.yml
+  # runs only for main, so nothing else checks a push to async or the merge
+  # commit of async-sync.yml against it. The vendored tree must be pristine
+  # upstream, and the default SDK build must succeed and hold no
+  # fiber/coop/async symbols (libphp-build.sh runs
+  # async/check-no-fiber-symbols.sh on its own output). PRs into async also get
+  # main's full pipeline from build-matrix.yml; this job is what a sync or a
+  # direct push gets.
+  sdk-contract:
+    runs-on: ubuntu-latest
+    container:
+      image: ubuntu:26.04
+    env:
+      FPMNG_TLS: "1"
+      FPMNG_ACME: "1"
+      FPMNG_DEBUG_CLOCK: "1"
+    steps:
+      - name: git for actions/checkout
+        shell: bash
+        run: apt-get update -qq && apt-get install -y -qq --no-install-recommends git ca-certificates
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.ref || github.sha }}
+      - name: install the PHP 8.5 SDK and the toolchain
+        shell: bash
+        run: ./build/ci-install-deps.sh build
+      - name: the vendored php-src subset is pristine upstream
+        run: ./build/vendor-php-src.sh check
+      - name: default SDK build, no fiber/coop/async symbols
+        run: ./build/libphp-build.sh "$PWD/out-libphp"
+
   fiber-phpt:
     runs-on: ubuntu-latest
     container:

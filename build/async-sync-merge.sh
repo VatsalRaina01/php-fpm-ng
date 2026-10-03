@@ -33,7 +33,10 @@
 #      conflicted paths are listed one per line in <report-file>
 #   3  the merge would delete async paths; they are listed one per line in
 #      <report-file>, HEAD reset to its pre-merge commit, nothing pushed
-#   1  anything else (bad usage, fetch/push failure)
+#   4  the merge is clean but pushing the scratch ref failed (a token without
+#      the `workflow` scope is refused when main changed .github/workflows/);
+#      git's message is in <report-file>, HEAD stays the merge commit
+#   1  anything else (bad usage, fetch failure)
 set -eu
 
 usage() {
@@ -88,4 +91,11 @@ if [ -n "$deleted" ]; then
 	echo "async-sync-merge.sh: deletions all listed in $ALLOW; publishing"
 fi
 
-git push --force "$REMOTE" "HEAD:refs/heads/$SCRATCH"
+# Its own exit code: the workflow reports this one in an issue, because it is
+# where the first push carrying main's .github/workflows/ changes is refused.
+if ! git push --force "$REMOTE" "HEAD:refs/heads/$SCRATCH" 2> "$REPORT"; then
+	cat "$REPORT" >&2
+	echo "async-sync-merge.sh: pushing the scratch ref $SCRATCH failed" >&2
+	exit 4
+fi
+: > "$REPORT"

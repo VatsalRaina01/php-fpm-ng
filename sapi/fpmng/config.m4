@@ -664,7 +664,7 @@ if test "$PHP_FPMNG" != "no"; then
 
   dnl Multi-request executors (pool.executor = fiber / async) are opt-in and
   dnl OFF by default, so a default build carries none of their code. Each
-  dnl flag pulls in its own source list, substituted by build/prepare.sh from
+  dnl flag pulls in its own source list, substituted by async/prepare.sh from
   dnl the same file the base list comes from (see NOTES: the source split).
   dnl Branch async: build/prepare.sh is main's file and knows no fiber group,
   dnl so it would list the fiber/coop/async sources in PHP_FPMNG_FILES, the
