@@ -235,7 +235,7 @@ off_reason() {
   USE_LOCKING)                  echo "fastcgi.c's accept() lock for platforms without a thread-safe accept(); never on Linux" ;;
   PHP_FPM_ZLOG_TRACE)           echo "scoreboard debug tracing, a developer switch upstream never enables" ;;
   FPMNG_BUILT_PHP_VERSION|FPMNG_BUILT_PHP_VERSION_ID) echo "test seam of build/libphp/libphp_abi_check.c, set only through EXTRA_CFLAGS" ;;
-  HAVE_FPMNG_FIBER|HAVE_FPMNG_FIBER_TLS|HAVE_FPMNG_ASYNC)
+  HAVE_FPMNG_FIBER|HAVE_FPMNG_FIBER_TLS|HAVE_FPMNG_ASYNC|FPMNG_ASYNC_ENGINE)
                                 echo "branch async: the executors need patches 0007/0008 inside libphp, which is the distribution's file; from-source builds only (async/README.md)" ;;
   *) return 1 ;;
   esac
