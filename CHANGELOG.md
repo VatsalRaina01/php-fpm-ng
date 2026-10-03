@@ -12,7 +12,10 @@ v0.5.0, v0.5.1 and v0.11.0 have no GitHub release.
 ## [Unreleased]
 
 ### Removed
-- The dead optimized-transport patches `0003` (buffered read, `accept4`), `0004` (`fcgi_set_optimized_transport()`) and `0005` (`writev`), the `HAVE_ACCEPT4` probe and its binary assert; `third_party/php-src/` is re-imported at php-8.5.9. `main` carries only patches 0001 and 0002 (#589).
+- The dead optimized-transport patches `0003` (buffered read, `accept4`), `0004` (`fcgi_set_optimized_transport()`) and `0005` (`writev`), the `HAVE_ACCEPT4` probe and its binary assert; `third_party/php-src/` is re-imported at php-8.5.9. `main` carries only patches 0001 and 0002 (#589; 0002 was removed in #590).
+
+### Changed
+- `pool.type = fastcgi`: TCP_NODELAY is now set on the listening socket by the SAPI (`.listening_socket_nodelay`) and so applies to every accepted TCP connection, not only FCGI_KEEP_CONN ones. It replaces php-src patch `0002` (`main/fastcgi.c`), which is removed; `main` now carries only patch `0001`. No latency change against 0.12.0, which already carried the patch (#590).
 
 ### Fixed
 - `pool.type = gateway` and `pool.type = http-direct`: a request header whose name contains `_` is no longer passed to the worker. `X_Real_IP` and `X-Real-IP` both became `HTTP_X_REAL_IP` and the last one won, so a client could override a header set by the reverse proxy in front (nginx drops such headers by default, `underscores_in_headers off`, and Apache 2.4 drops them too). The header is now dropped; there is no opt-in option (#595).
