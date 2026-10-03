@@ -18,9 +18,9 @@
 /* Nanosecond mtime: macOS has st_mtimespec, glibc/musl st_mtim (and define
  * st_mtime as a macro for its tv_sec). Fall back to seconds without either. */
 #if defined(__APPLE__)
-# define FPM_REVAL_MTIM(st) ((st)->st_mtimespec)
+#define FPM_REVAL_MTIM(st) ((st)->st_mtimespec)
 #elif defined(st_mtime)
-# define FPM_REVAL_MTIM(st) ((st)->st_mtim)
+#define FPM_REVAL_MTIM(st) ((st)->st_mtim)
 #endif
 
 struct fpm_coop_reval_rec_s {
@@ -87,16 +87,16 @@ static void fpm_coop_reval_remember(zend_string *path) /* {{{ */
 	 * The window is only the first-compilation microseconds; deliberately simple. */
 	if (fpm_coop_reval_stat(ZSTR_VAL(path), &st) < 0) {
 		zlog(ZLOG_DEBUG, "[pool %s] revalidate: cannot stat %s (%s), not tracked",
-			fpm_coop_pool_name(), ZSTR_VAL(path), strerror(errno));
+				fpm_coop_pool_name(), ZSTR_VAL(path), strerror(errno));
 		return;
 	}
 	rec = pemalloc(sizeof(*rec), 1);
 	fpm_coop_reval_rec_fill(rec, &st);
 	key = zend_string_init(ZSTR_VAL(path), ZSTR_LEN(path), 1);
 	zend_hash_add_new_ptr(&fpm_coop_reval_files, key, rec);
-	zend_string_release(key);	/* the table keeps its own reference */
+	zend_string_release(key); /* the table keeps its own reference */
 	zlog(ZLOG_DEBUG, "[pool %s] revalidate: tracking %s (%u files)",
-		fpm_coop_pool_name(), ZSTR_VAL(path), zend_hash_num_elements(&fpm_coop_reval_files));
+			fpm_coop_pool_name(), ZSTR_VAL(path), zend_hash_num_elements(&fpm_coop_reval_files));
 }
 /* }}} */
 
@@ -147,7 +147,8 @@ int fpm_coop_reval_sweep(const char **path, char *why, size_t why_len) /* {{{ */
 	}
 	fpm_coop_reval_sweeps++;
 
-	ZEND_HASH_FOREACH_STR_KEY_PTR(&fpm_coop_reval_files, key, rec) {
+	ZEND_HASH_FOREACH_STR_KEY_PTR(&fpm_coop_reval_files, key, rec)
+	{
 		struct stat st;
 		struct fpm_coop_reval_rec_s now;
 
@@ -159,7 +160,7 @@ int fpm_coop_reval_sweep(const char **path, char *why, size_t why_len) /* {{{ */
 		fpm_coop_reval_rec_fill(&now, &st);
 		if (now.mtime_sec != rec->mtime_sec || now.mtime_nsec != rec->mtime_nsec) {
 			snprintf(why, why_len, "mtime %ld.%09ld -> %ld.%09ld",
-				(long) rec->mtime_sec, rec->mtime_nsec, (long) now.mtime_sec, now.mtime_nsec);
+					(long) rec->mtime_sec, rec->mtime_nsec, (long) now.mtime_sec, now.mtime_nsec);
 		} else if (now.size != rec->size) {
 			snprintf(why, why_len, "size %lld -> %lld", (long long) rec->size, (long long) now.size);
 		} else if (now.ino != rec->ino || now.dev != rec->dev) {
@@ -170,7 +171,8 @@ int fpm_coop_reval_sweep(const char **path, char *why, size_t why_len) /* {{{ */
 		}
 		*path = ZSTR_VAL(key);
 		return 1;
-	} ZEND_HASH_FOREACH_END();
+	}
+	ZEND_HASH_FOREACH_END();
 
 	return 0;
 }

@@ -204,7 +204,7 @@ static void psw_set_owner(psw_entry *e, struct fpm_coop_req_s *ctx) /* {{{ */
 {
 	e->owner = ctx;
 	if (ctx) {
-		zend_hash_index_update_ptr(&psw_owners, (zend_ulong)(uintptr_t) ctx, e);
+		zend_hash_index_update_ptr(&psw_owners, (zend_ulong) (uintptr_t) ctx, e);
 	}
 }
 /* }}} */
@@ -212,7 +212,7 @@ static void psw_set_owner(psw_entry *e, struct fpm_coop_req_s *ctx) /* {{{ */
 static void psw_clear_owner(psw_entry *e) /* {{{ */
 {
 	if (e->owner) {
-		zend_hash_index_del(&psw_owners, (zend_ulong)(uintptr_t) e->owner);
+		zend_hash_index_del(&psw_owners, (zend_ulong) (uintptr_t) e->owner);
 		e->owner = NULL;
 	}
 }
@@ -235,8 +235,9 @@ static bool psw_lock_acquire(zend_string *key) /* {{{ */
 			if (!psw_nowait_warned) {
 				psw_nowait_warned = true;
 				zlog(ZLOG_WARNING, "[pool %s] coop-session-patch: cannot suspend the current fiber to wait "
-					"for an in-process session lock (nested user Fiber?) - proceeding without it "
-					"(logged once per process)", fpm_coop_pool_name());
+								   "for an in-process session lock (nested user Fiber?) - proceeding without it "
+								   "(logged once per process)",
+						fpm_coop_pool_name());
 			}
 			return false;
 		}
@@ -244,7 +245,7 @@ static bool psw_lock_acquire(zend_string *key) /* {{{ */
 		waiter = fpm_fiber_io_waker();
 		psw_waiter_enqueue(e, waiter);
 		memset(&op, 0, sizeof(op));
-		op.type = FPM_FIBER_IO_OP_WAKE;	/* no deadline: until psw_wake_one() */
+		op.type = FPM_FIBER_IO_OP_WAKE; /* no deadline: until psw_wake_one() */
 		fpm_fiber_io_run(&psw_intercept, &op);
 	}
 
@@ -320,7 +321,8 @@ static zend_result psw_read(PS_READ_ARGS) /* {{{ */
 static zend_result psw_write(PS_WRITE_ARGS) /* {{{ */
 {
 	psw_mod_data *d = *mod_data;
-	if (!d) return FAILURE;
+	if (!d)
+		return FAILURE;
 	return psw_orig->s_write(&d->inner, key, val, maxlifetime);
 }
 /* }}} */
@@ -328,7 +330,8 @@ static zend_result psw_write(PS_WRITE_ARGS) /* {{{ */
 static zend_result psw_destroy(PS_DESTROY_ARGS) /* {{{ */
 {
 	psw_mod_data *d = *mod_data;
-	if (!d) return FAILURE;
+	if (!d)
+		return FAILURE;
 	return psw_orig->s_destroy(&d->inner, key);
 }
 /* }}} */
@@ -336,7 +339,10 @@ static zend_result psw_destroy(PS_DESTROY_ARGS) /* {{{ */
 static zend_long psw_gc(PS_GC_ARGS) /* {{{ */
 {
 	psw_mod_data *d = *mod_data;
-	if (!d) { *nrdels = 0; return 0; }
+	if (!d) {
+		*nrdels = 0;
+		return 0;
+	}
 	return psw_orig->s_gc(&d->inner, maxlifetime, nrdels);
 }
 /* }}} */
@@ -344,7 +350,8 @@ static zend_long psw_gc(PS_GC_ARGS) /* {{{ */
 static zend_string *psw_create_sid(PS_CREATE_SID_ARGS) /* {{{ */
 {
 	psw_mod_data *d = *mod_data;
-	if (!d) return NULL;
+	if (!d)
+		return NULL;
 	return psw_orig->s_create_sid(&d->inner);
 }
 /* }}} */
@@ -352,7 +359,8 @@ static zend_string *psw_create_sid(PS_CREATE_SID_ARGS) /* {{{ */
 static zend_result psw_validate_sid(PS_VALIDATE_SID_ARGS) /* {{{ */
 {
 	psw_mod_data *d = *mod_data;
-	if (!d) return FAILURE;
+	if (!d)
+		return FAILURE;
 	return psw_orig->s_validate_sid(&d->inner, key);
 }
 /* }}} */
@@ -360,7 +368,8 @@ static zend_result psw_validate_sid(PS_VALIDATE_SID_ARGS) /* {{{ */
 static zend_result psw_update_timestamp(PS_UPDATE_TIMESTAMP_ARGS) /* {{{ */
 {
 	psw_mod_data *d = *mod_data;
-	if (!d) return FAILURE;
+	if (!d)
+		return FAILURE;
 	return psw_orig->s_update_timestamp(&d->inner, key, val, maxlifetime);
 }
 /* }}} */
@@ -402,7 +411,8 @@ void fpm_coop_session_patch_container_start(void) /* {{{ */
 	psw_globals_addr = psw_resolve_globals_addr();
 	if (!psw_globals_addr) {
 		zlog(ZLOG_WARNING, "[pool %s] coop-session-patch: session.save_path ini-entry trick did not resolve "
-			"- in-process session-lock patch variant NOT installed", fpm_coop_pool_name());
+						   "- in-process session-lock patch variant NOT installed",
+				fpm_coop_pool_name());
 		return;
 	}
 
@@ -413,9 +423,10 @@ void fpm_coop_session_patch_container_start(void) /* {{{ */
 	ps = (php_ps_globals *) psw_globals_addr;
 	if (!ps->mod || !ps->mod->s_name || strcasecmp(ps->mod->s_name, "files") != 0) {
 		zlog(ZLOG_NOTICE, "[pool %s] coop-session-patch: session.save_handler default is not \"files\" at "
-			"container start (got %s) - patch variant stays inert for this pool for the life of the "
-			"process (it does not retry later)", fpm_coop_pool_name(),
-			(ps->mod && ps->mod->s_name) ? ps->mod->s_name : "(none)");
+						  "container start (got %s) - patch variant stays inert for this pool for the life of the "
+						  "process (it does not retry later)",
+				fpm_coop_pool_name(),
+				(ps->mod && ps->mod->s_name) ? ps->mod->s_name : "(none)");
 		return;
 	}
 
@@ -436,9 +447,10 @@ void fpm_coop_session_patch_container_start(void) /* {{{ */
 	psw_ready = true;
 
 	zlog(ZLOG_NOTICE, "[pool %s] coop-session-patch: in-process session-lock patch variant installed - "
-		"will overwrite ps_globals.mod after each request's RINIT whenever session.save_handler resolves "
-		"to the built-in \"files\" module; session.save_handler = files needs NO reconfiguration for this "
-		"variant (compare to the files_arb variant, which does)", fpm_coop_pool_name());
+					  "will overwrite ps_globals.mod after each request's RINIT whenever session.save_handler resolves "
+					  "to the built-in \"files\" module; session.save_handler = files needs NO reconfiguration for this "
+					  "variant (compare to the files_arb variant, which does)",
+			fpm_coop_pool_name());
 }
 /* }}} */
 
@@ -498,8 +510,9 @@ static void psw_check_and_apply(bool warn_on_rebind) /* {{{ */
 	if (warn_on_rebind && !psw_rebind_warned) {
 		psw_rebind_warned = true;
 		zlog(ZLOG_WARNING, "[pool %s] coop-session-patch: detected session.save_handler resolving back to "
-			"the real \"files\" module mid-request (an ini_set() bypassed the patch) - re-applying the "
-			"in-process lock wrapper now (logged once per process)", fpm_coop_pool_name());
+						   "the real \"files\" module mid-request (an ini_set() bypassed the patch) - re-applying the "
+						   "in-process lock wrapper now (logged once per process)",
+				fpm_coop_pool_name());
 	}
 
 	ps->mod = &psw_mod;
@@ -530,14 +543,14 @@ void fpm_coop_session_patch_req_free(struct fpm_coop_req_s *ctx) /* {{{ */
 		return;
 	}
 
-	e = zend_hash_index_find_ptr(&psw_owners, (zend_ulong)(uintptr_t) ctx);
+	e = zend_hash_index_find_ptr(&psw_owners, (zend_ulong) (uintptr_t) ctx);
 	if (!e) {
 		return;
 	}
 
 	zlog(ZLOG_WARNING, "[pool %s] coop-session-patch: request ctx #%u freed while still attributed as the "
-		"holder of an in-process session lock - force-releasing it (leak safety net)",
-		fpm_coop_pool_name(), ctx->id);
+					   "holder of an in-process session lock - force-releasing it (leak safety net)",
+			fpm_coop_pool_name(), ctx->id);
 
 	e->held = false;
 	psw_clear_owner(e);

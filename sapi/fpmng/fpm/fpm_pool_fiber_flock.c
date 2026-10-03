@@ -6,7 +6,7 @@
 #include <stdbool.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/file.h>	/* LOCK_SH/LOCK_EX/LOCK_UN/LOCK_NB — standard BSD constants, as in ext/standard/flock_compat.h */
+#include <sys/file.h> /* LOCK_SH/LOCK_EX/LOCK_UN/LOCK_NB — standard BSD constants, as in ext/standard/flock_compat.h */
 #include <sys/stat.h>
 #include <sys/types.h>
 
@@ -24,9 +24,9 @@
  * ever also runs under an executor other than fiber (async with OS threads?),
  * THIS assumption must be reconsidered from scratch. */
 
-#define FPM_FLOCK_MAX_ENTRIES   4096
-#define FPM_FLOCK_MAX_SH        64
-#define FPM_FLOCK_MAX_WAITERS   64
+#define FPM_FLOCK_MAX_ENTRIES 4096
+#define FPM_FLOCK_MAX_SH 64
+#define FPM_FLOCK_MAX_WAITERS 64
 
 /* Default NB+retry polling parameters for INTER-PROCESS contention (another
  * process holds the kernel lock — there is no readiness event, so polling is
@@ -35,16 +35,16 @@
  * (the first NB failure falls straight through to the real blocking flock()) —
  * to compare the cost of "poll then block" with "just block". */
 #define FPM_FLOCK_POLL_ATTEMPTS_DEFAULT 5
-#define FPM_FLOCK_POLL_INTERVAL_USEC    20000	/* 20 ms */
+#define FPM_FLOCK_POLL_INTERVAL_USEC 20000 /* 20 ms */
 
 struct fpm_flock_entry_s {
 	bool used;
 	dev_t dev;
 	ino_t ino;
-	void *ex_owner;			/* Fiber waiter handle holding LOCK_EX in THIS process, or NULL */
+	void *ex_owner; /* Fiber waiter handle holding LOCK_EX in THIS process, or NULL */
 	void *sh_owners[FPM_FLOCK_MAX_SH];
 	int sh_count;
-	void *waiters[FPM_FLOCK_MAX_WAITERS];	/* Fibers waiting for SOMETHING on this file in this process */
+	void *waiters[FPM_FLOCK_MAX_WAITERS]; /* Fibers waiting for SOMETHING on this file in this process */
 	int n_waiters;
 };
 
@@ -56,7 +56,7 @@ static bool fpm_flock_waiters_full_warned = false;
 static int (*fpm_flock_orig_set_option)(php_stream *stream, int option, int value, void *ptrparam);
 static bool fpm_flock_installed = false;
 
-static int fpm_flock_poll_attempts = -1;	/* -1 = not read from env yet */
+static int fpm_flock_poll_attempts = -1; /* -1 = not read from env yet */
 
 static int fpm_flock_poll_attempts_get(void) /* {{{ */
 {
@@ -92,8 +92,9 @@ static struct fpm_flock_entry_s *fpm_flock_find(dev_t dev, ino_t ino, bool creat
 		if (!fpm_flock_table_full_warned) {
 			fpm_flock_table_full_warned = true;
 			zlog(ZLOG_WARNING, "fiber: flock registry full (%d files locked at once in one process); "
-				"falling back to the plain flock() syscall for further files — no in-process "
-				"suspend-instead-of-block for them, but correctness is unaffected", FPM_FLOCK_MAX_ENTRIES);
+							   "falling back to the plain flock() syscall for further files — no in-process "
+							   "suspend-instead-of-block for them, but correctness is unaffected",
+					FPM_FLOCK_MAX_ENTRIES);
 		}
 		return NULL;
 	}
@@ -145,7 +146,7 @@ static void fpm_flock_sh_add(struct fpm_flock_entry_s *e, void *owner) /* {{{ */
 
 	for (i = 0; i < e->sh_count; i++) {
 		if (e->sh_owners[i] == owner) {
-			return;	/* already on the list */
+			return; /* already on the list */
 		}
 	}
 	if (e->sh_count == FPM_FLOCK_MAX_SH) {
@@ -164,11 +165,11 @@ static void fpm_flock_sh_add(struct fpm_flock_entry_s *e, void *owner) /* {{{ */
 static void fpm_flock_register_holder(struct fpm_flock_entry_s *e, void *owner, int mode) /* {{{ */
 {
 	if (mode == LOCK_EX) {
-		fpm_flock_sh_remove(e, owner);	/* upgrade SH->EX for the same owner, if it held SH */
+		fpm_flock_sh_remove(e, owner); /* upgrade SH->EX for the same owner, if it held SH */
 		e->ex_owner = owner;
 	} else { /* LOCK_SH */
 		if (e->ex_owner == owner) {
-			e->ex_owner = NULL;	/* downgrade EX->SH for the same owner */
+			e->ex_owner = NULL; /* downgrade EX->SH for the same owner */
 		}
 		fpm_flock_sh_add(e, owner);
 	}
@@ -192,8 +193,9 @@ static bool fpm_flock_add_waiter(struct fpm_flock_entry_s *e, void *owner) /* {{
 		if (!fpm_flock_waiters_full_warned) {
 			fpm_flock_waiters_full_warned = true;
 			zlog(ZLOG_WARNING, "fiber: flock wait queue full for one file (%d waiters); "
-				"failing the lock attempt for the overflow waiter with EWOULDBLOCK instead of "
-				"blocking the process on a same-process holder", FPM_FLOCK_MAX_WAITERS);
+							   "failing the lock attempt for the overflow waiter with EWOULDBLOCK instead of "
+							   "blocking the process on a same-process holder",
+					FPM_FLOCK_MAX_WAITERS);
 		}
 		return false;
 	}
@@ -368,7 +370,7 @@ static int fpm_fiber_flock_set_option(php_stream *stream, int option, int value,
 		while (fpm_flock_conflict(entry, owner, mode)) {
 			if (nb) {
 				errno = EWOULDBLOCK;
-				return -1;	/* caller requested LOCK_NB — do not suspend or block */
+				return -1; /* caller requested LOCK_NB — do not suspend or block */
 			}
 			if (!fpm_fiber_io_can_suspend(&fpm_fiber_flock_intercept) || !fpm_flock_add_waiter(entry, owner)) {
 				/* FIX (was: fall through to a real BLOCKING flock() here).
@@ -411,7 +413,7 @@ static int fpm_fiber_flock_set_option(php_stream *stream, int option, int value,
 				struct fpm_fiber_io_op_s op;
 
 				memset(&op, 0, sizeof(op));
-				op.type = FPM_FIBER_IO_OP_WAKE;	/* no deadline: until the holder's LOCK_UN */
+				op.type = FPM_FIBER_IO_OP_WAKE; /* no deadline: until the holder's LOCK_UN */
 				fpm_fiber_io_run(&fpm_fiber_flock_intercept, &op);
 			}
 			/* After waking, return to the VERY START of this inner loop — check
@@ -435,8 +437,8 @@ static int fpm_fiber_flock_set_option(php_stream *stream, int option, int value,
 			fpm_flock_register_holder(entry, owner, mode);
 			return 0;
 		}
-		if (errno != EWOULDBLOCK) {	/* EAGAIN == EWOULDBLOCK on Linux; one check covers both there */
-			return ret;	/* real error, not contention — retrying makes no sense */
+		if (errno != EWOULDBLOCK) { /* EAGAIN == EWOULDBLOCK on Linux; one check covers both there */
+			return ret; /* real error, not contention — retrying makes no sense */
 		}
 
 		/* EWOULDBLOCK: either INTER-PROCESS contention (another process holds the
@@ -459,7 +461,7 @@ static int fpm_fiber_flock_set_option(php_stream *stream, int option, int value,
 			memset(&op, 0, sizeof(op));
 			op.type = FPM_FIBER_IO_OP_TIMER;
 			op.timeout = &iv;
-			fpm_fiber_io_run(&fpm_fiber_flock_intercept, &op);	/* suspend the Fiber without blocking the process; returns on timeout */
+			fpm_fiber_io_run(&fpm_fiber_flock_intercept, &op); /* suspend the Fiber without blocking the process; returns on timeout */
 		}
 	}
 
@@ -502,5 +504,5 @@ struct fpm_fiber_intercept_s fpm_fiber_flock_intercept = {
 	 * can never run again. Nothing ends that wait (no request_terminate_timeout,
 	 * max_execution_time = 0 under this executor). */
 	.disabled_hazard = "a flock() that conflicts with a lock held by another request of this process "
-		"never returns and hangs this child until it is killed",
+					   "never returns and hangs this child until it is killed",
 };

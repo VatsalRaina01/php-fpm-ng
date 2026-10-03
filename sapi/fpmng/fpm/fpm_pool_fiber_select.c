@@ -73,8 +73,8 @@ int fpm_fiber_select(int max_fd, fd_set *rfds, fd_set *wfds, fd_set *efds, struc
 		if (have_efds && !fpm_fiber_select_efds_warned) {
 			fpm_fiber_select_efds_warned = true;
 			zlog(ZLOG_DEBUG, "[pool %s] fiber: stream_select() with a non-empty "
-				"exceptfds set falls back to blocking select() (once per process)",
-				fpm_coop_pool_name());
+							 "exceptfds set falls back to blocking select() (once per process)",
+					fpm_coop_pool_name());
 		}
 		return select(max_fd, rfds, wfds, efds, timeout);
 	}

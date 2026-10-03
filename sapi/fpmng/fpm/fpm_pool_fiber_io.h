@@ -38,7 +38,7 @@ struct addrinfo;
 /* Readiness events. Our own bits rather than libevent's EV_READ/EV_WRITE, so a
  * client (and a php-src patch) does not include event2/ — the RFC's
  * Poll\Event::Read/Write. */
-#define FPM_FIBER_IO_READ  0x1
+#define FPM_FIBER_IO_READ 0x1
 #define FPM_FIBER_IO_WRITE 0x2
 
 /* The RFC's CompletionStatus, restricted to what a readiness provider in one
@@ -64,22 +64,22 @@ enum fpm_fiber_io_completion {
 };
 
 enum fpm_fiber_io_op_type {
-	FPM_FIBER_IO_OP_POLL,		/* u.poll: one fd, until ready or deadline */
-	FPM_FIBER_IO_OP_TIMER,		/* deadline only (timeout must be set) */
-	FPM_FIBER_IO_OP_WAKE,		/* until fpm_fiber_io_wake(waker) or deadline */
-	FPM_FIBER_IO_OP_ANY,		/* u.any: several fds, until one is ready or deadline */
-	FPM_FIBER_IO_OP_GETADDRINFO	/* u.getaddrinfo: resolve a host name, until answer or deadline */
+	FPM_FIBER_IO_OP_POLL, /* u.poll: one fd, until ready or deadline */
+	FPM_FIBER_IO_OP_TIMER, /* deadline only (timeout must be set) */
+	FPM_FIBER_IO_OP_WAKE, /* until fpm_fiber_io_wake(waker) or deadline */
+	FPM_FIBER_IO_OP_ANY, /* u.any: several fds, until one is ready or deadline */
+	FPM_FIBER_IO_OP_GETADDRINFO /* u.getaddrinfo: resolve a host name, until answer or deadline */
 };
 
 struct fpm_fiber_io_poll_s {
 	int fd;
-	unsigned events;	/* in:  FPM_FIBER_IO_READ | FPM_FIBER_IO_WRITE */
-	unsigned revents;	/* out: the subset observed ready */
+	unsigned events; /* in:  FPM_FIBER_IO_READ | FPM_FIBER_IO_WRITE */
+	unsigned revents; /* out: the subset observed ready */
 };
 
 struct fpm_fiber_io_op_s {
 	enum fpm_fiber_io_op_type type;
-	struct timeval *timeout;	/* NULL = no deadline */
+	struct timeval *timeout; /* NULL = no deadline */
 	union {
 		struct fpm_fiber_io_poll_s poll;
 		struct {
@@ -90,9 +90,9 @@ struct fpm_fiber_io_op_s {
 			int count;
 		} any;
 		struct {
-			const char *host;		/* in */
-			struct addrinfo *res;		/* out, READY with gai_error 0; free with fpm_fiber_io_freeaddrinfo */
-			int gai_error;			/* out, READY: 0 or an EVUTIL_EAI_* code for fpm_fiber_io_gai_strerror */
+			const char *host; /* in */
+			struct addrinfo *res; /* out, READY with gai_error 0; free with fpm_fiber_io_freeaddrinfo */
+			int gai_error; /* out, READY: 0 or an EVUTIL_EAI_* code for fpm_fiber_io_gai_strerror */
 		} getaddrinfo;
 	} u;
 };
@@ -102,7 +102,7 @@ struct fpm_fiber_io_op_s {
  * that is not in the registry (the session lock arbiter in
  * fpm_pool_coop_session_patch.c) is never disabled: zero-initialised means on. */
 struct fpm_fiber_intercept_s {
-	const char *name;		/* the name fiber.disable_interceptions takes */
+	const char *name; /* the name fiber.disable_interceptions takes */
 	/* Called once per child, after every extension's MINIT, in table order.
 	 * NULL when there is nothing to install (the patch 0008 call site is
 	 * compiled in; only the switch applies). */

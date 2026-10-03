@@ -141,9 +141,9 @@ static bool fpm_coop_session_selfcheck(void) /* {{{ */
 
 	if (ps->cookie_lifetime != ini_val) {
 		zlog(ZLOG_ALERT, "[pool %s] coop-session: SELFCHECK FAILED — session.cookie_lifetime read from the computed "
-			"ps_globals address (" ZEND_LONG_FMT ") != value from ini (" ZEND_LONG_FMT "); the address from the ini entry "
-			"does NOT point at the real ps_globals, ext/session state isolation DISABLED",
-			fpm_coop_pool_name(), ps->cookie_lifetime, ini_val);
+						 "ps_globals address (" ZEND_LONG_FMT ") != value from ini (" ZEND_LONG_FMT "); the address from the ini entry "
+						 "does NOT point at the real ps_globals, ext/session state isolation DISABLED",
+				fpm_coop_pool_name(), ps->cookie_lifetime, ini_val);
 		return false;
 	}
 	return true;
@@ -164,16 +164,17 @@ void fpm_coop_session_container_start(void) /* {{{ */
 	entry = zend_hash_str_find_ptr(EG(ini_directives), ZEND_STRL("session.save_path"));
 	if (!entry || !entry->mh_arg2) {
 		zlog(ZLOG_WARNING, "[pool %s] coop-session: the session module is loaded, but no working ini entry for "
-			"'session.save_path' — the hook did not take effect, ext/session state isolation DISABLED "
-			"(session_start() will only work with one request in flight)",
-			fpm_coop_pool_name());
+						   "'session.save_path' — the hook did not take effect, ext/session state isolation DISABLED "
+						   "(session_start() will only work with one request in flight)",
+				fpm_coop_pool_name());
 		return;
 	}
 
 	mod = zend_hash_str_find_ptr(&module_registry, ZEND_STRL("session"));
 	if (!mod || !mod->request_startup_func || !mod->request_shutdown_func) {
 		zlog(ZLOG_WARNING, "[pool %s] coop-session: modul session bez RINIT/RSHUTDOWN w module_registry — "
-			"izolacja stanu ext/session WYLACZONA", fpm_coop_pool_name());
+						   "izolacja stanu ext/session WYLACZONA",
+				fpm_coop_pool_name());
 		return;
 	}
 
@@ -194,8 +195,8 @@ void fpm_coop_session_container_start(void) /* {{{ */
 	fpm_coop_session_ready = true;
 
 	zlog(ZLOG_NOTICE, "[pool %s] coop-session: izolacja stanu ext/session per request WLACZONA "
-		"(punkt zaczepienia: wpis ini 'session.save_path', modul '%s')",
-		fpm_coop_pool_name(), mod->name);
+					  "(punkt zaczepienia: wpis ini 'session.save_path', modul '%s')",
+			fpm_coop_pool_name(), mod->name);
 }
 /* }}} */
 
@@ -243,8 +244,10 @@ void fpm_coop_session_request_shutdown(void) /* {{{ */
 	if (!fpm_coop_session_ready) {
 		return;
 	}
-	zend_try {
+	zend_try
+	{
 		fpm_coop_session_mod->request_shutdown_func(fpm_coop_session_mod->type, fpm_coop_session_mod->module_number);
-	} zend_end_try();
+	}
+	zend_end_try();
 }
 /* }}} */

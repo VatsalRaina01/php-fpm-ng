@@ -28,7 +28,7 @@
 #include "zend_exceptions.h"
 #include "zend_extensions.h"
 #include "zend_ini.h"
-#include "zend_compile.h"		/* zend_is_auto_global(), ZEND_STR_AUTOGLOBAL_* */
+#include "zend_compile.h" /* zend_is_auto_global(), ZEND_STR_AUTOGLOBAL_* */
 
 #include "fpm.h"
 #include "fpm_conf.h"
@@ -41,16 +41,16 @@
 #include "zlog.h"
 
 const char *const fpm_coop_rejects[] = {
-	"pm.max_requests",			/* requests are not counted per process */
-	"request_terminate_timeout",		/* the scoreboard does not see in-flight requests */
+	"pm.max_requests", /* requests are not counted per process */
+	"request_terminate_timeout", /* the scoreboard does not see in-flight requests */
 	"request_terminate_timeout_track_finished",
 	"request_slowlog_timeout",
 	"request_slowlog_trace_depth",
 	"slowlog",
-	"ping.",				/* fpm_main.c's loop handles ping, not us */
-	"pm.status_path",			/* upstream's FastCGI status page is fpm_main.c's loop too */
-	"http.",				/* http.* tunes a gateway; this pool is a gateway's target, not one */
-	"worker.",				/* worker.* means pool.executor = worker, a different executor entirely (issue #331) */
+	"ping.", /* fpm_main.c's loop handles ping, not us */
+	"pm.status_path", /* upstream's FastCGI status page is fpm_main.c's loop too */
+	"http.", /* http.* tunes a gateway; this pool is a gateway's target, not one */
+	"worker.", /* worker.* means pool.executor = worker, a different executor entirely (issue #331) */
 	NULL
 };
 
@@ -71,9 +71,9 @@ const char *const fpm_coop_rejects[] = {
  * code keeps working. proc_open/popen/exec (fork+exec, whose child does not
  * return to the scheduler) remain available. */
 static const char fpm_coop_disabled_functions[] =
-	"pcntl_signal,pcntl_signal_get_handler,pcntl_signal_dispatch,pcntl_async_signals,"
-	"pcntl_sigprocmask,pcntl_sigwaitinfo,pcntl_sigtimedwait,pcntl_alarm,"
-	"pcntl_fork,pcntl_rfork,pcntl_forkx,pcntl_exec";
+		"pcntl_signal,pcntl_signal_get_handler,pcntl_signal_dispatch,pcntl_async_signals,"
+		"pcntl_sigprocmask,pcntl_sigwaitinfo,pcntl_sigtimedwait,pcntl_alarm,"
+		"pcntl_fork,pcntl_rfork,pcntl_forkx,pcntl_exec";
 
 /* Request-container state: what the event loop sees when no request is on the
  * processor. We copy tables BY VALUE (the HashTable header). */
@@ -209,17 +209,17 @@ static bool fpm_coop_pool_session_auto_start(struct fpm_worker_pool_s *wp) /* {{
  * so this is a hard refusal, not a downgrade: nothing this project can hook
  * runs early enough to fix either one. */
 static const char fpm_coop_session_auto_start_msg[] =
-	"session.auto_start = 1 is not supported: (1) the auto-started session "
-	"cannot see this request's own cookie (RINIT runs before $_COOKIE is "
-	"rebuilt for the request, so every auto_start=1 request gets a fresh, "
-	"unrelated session id -- see docs/session-lock-arbiter-report.md and "
-	"the RED suite's test 10) and (2) it also runs outside the in-process "
-	"session-lock patch's protection (the patch's hook does not exist yet "
-	"when RINIT's auto-started session_start() runs, so concurrent access "
-	"can still deadlock the worker -- see docs/session-lock-arbiter-report.md, "
-	"\"The auto_start gap\"); set php_admin_value[session.auto_start] = 0 in "
-	"this pool or session.auto_start = 0 in php.ini and call session_start() "
-	"explicitly instead";
+		"session.auto_start = 1 is not supported: (1) the auto-started session "
+		"cannot see this request's own cookie (RINIT runs before $_COOKIE is "
+		"rebuilt for the request, so every auto_start=1 request gets a fresh, "
+		"unrelated session id -- see docs/session-lock-arbiter-report.md and "
+		"the RED suite's test 10) and (2) it also runs outside the in-process "
+		"session-lock patch's protection (the patch's hook does not exist yet "
+		"when RINIT's auto-started session_start() runs, so concurrent access "
+		"can still deadlock the worker -- see docs/session-lock-arbiter-report.md, "
+		"\"The auto_start gap\"); set php_admin_value[session.auto_start] = 0 in "
+		"this pool or session.auto_start = 0 in php.ini and call session_start() "
+		"explicitly instead";
 
 /* OPcache assumes one request per process: it clears the auto-global mask once
  * per request container (ZendAccelerator.c accel_activate), so a script loaded
@@ -227,30 +227,28 @@ static const char fpm_coop_session_auto_start_msg[] =
  * file timestamps are checked against container-start time, so a script edit is
  * never seen. Measured in 3t (fork) and 3u (upstream). */
 static const char fpm_coop_opcache_msg[] =
-	"opcache assumes one request per process (auto-globals mask and file "
-	"timestamps are reset once per request-container, see docs/NOTES.md 3u); "
-	"set php_admin_value[opcache.enable] = 0 in this pool or opcache.enable = 0 in php.ini";
+		"opcache assumes one request per process (auto-globals mask and file "
+		"timestamps are reset once per request-container, see docs/NOTES.md 3u); "
+		"set php_admin_value[opcache.enable] = 0 in this pool or opcache.enable = 0 in php.ini";
 
 int fpm_coop_validate(struct fpm_worker_pool_s *wp, const char *type_name) /* {{{ */
 {
 #ifdef ZTS
 	zlog(ZLOG_ALERT, "[pool %s] pool.executor = %s is not supported in a ZTS build (PHP %s): "
-		"it swaps sapi_globals/executor_globals by value, which only works in NTS",
-		wp->config->name, type_name, PHP_VERSION);
+					 "it swaps sapi_globals/executor_globals by value, which only works in NTS",
+			wp->config->name, type_name, PHP_VERSION);
 	return -1;
 #else
 	if (wp->config->pm != PM_STYLE_STATIC) {
 		zlog(ZLOG_ALERT, "[pool %s] pool.executor = %s supports only pm = static "
-			"(dynamic/ondemand scale on scoreboard idle/active counters this executor does not maintain)",
-			wp->config->name, type_name);
+						 "(dynamic/ondemand scale on scoreboard idle/active counters this executor does not maintain)",
+				wp->config->name, type_name);
 		return -1;
 	}
 	/* fpm_init() runs AFTER php_module_startup() (fpm_main.c), so Zend
 	 * extensions and their INI entries are already loaded — check here, not in
 	 * the child. */
-	if (zend_get_extension("Zend OPcache")
-		&& zend_ini_long("opcache.enable", sizeof("opcache.enable") - 1, 0)
-		&& !fpm_coop_pool_disables_opcache(wp)) {
+	if (zend_get_extension("Zend OPcache") && zend_ini_long("opcache.enable", sizeof("opcache.enable") - 1, 0) && !fpm_coop_pool_disables_opcache(wp)) {
 		zlog(ZLOG_ALERT, "[pool %s] pool.executor = %s: %s", wp->config->name, type_name, fpm_coop_opcache_msg);
 		return -1;
 	}
@@ -263,11 +261,10 @@ int fpm_coop_validate(struct fpm_worker_pool_s *wp, const char *type_name) /* {{
 		zend_long timeout = fpm_coop_pool_max_execution_time(wp);
 
 		if (timeout != 0) {
-			zlog(ZLOG_ALERT, "[pool %s] pool.executor = %s: max_execution_time = " ZEND_LONG_FMT
-				" is not enforced (the Zend timeout is one setitimer()/SIGPROF timer per process, "
-				"and this process runs many requests at once; see docs/fiber_errors.md); "
-				"set php_admin_value[max_execution_time] = 0 in this pool or max_execution_time = 0 in php.ini",
-				wp->config->name, type_name, timeout);
+			zlog(ZLOG_ALERT, "[pool %s] pool.executor = %s: max_execution_time = " ZEND_LONG_FMT " is not enforced (the Zend timeout is one setitimer()/SIGPROF timer per process, "
+							 "and this process runs many requests at once; see docs/fiber_errors.md); "
+							 "set php_admin_value[max_execution_time] = 0 in this pool or max_execution_time = 0 in php.ini",
+					wp->config->name, type_name, timeout);
 			return -1;
 		}
 	}
@@ -277,13 +274,13 @@ int fpm_coop_validate(struct fpm_worker_pool_s *wp, const char *type_name) /* {{
 	 * above for the full reasoning. */
 	if (fpm_coop_pool_session_auto_start(wp)) {
 		zlog(ZLOG_ALERT, "[pool %s] pool.executor = %s: %s", wp->config->name, type_name,
-			fpm_coop_session_auto_start_msg);
+				fpm_coop_session_auto_start_msg);
 		return -1;
 	}
 	/* fpm_conf_set_time parses through atoi(), so "-1" passes silently. */
 	if (wp->config->fiber_revalidate_freq < 0) {
 		zlog(ZLOG_ALERT, "[pool %s] fiber.revalidate_freq = %d: must be 0 (off) or a positive number of seconds",
-			wp->config->name, wp->config->fiber_revalidate_freq);
+				wp->config->name, wp->config->fiber_revalidate_freq);
 		return -1;
 	}
 	return 0;
@@ -409,7 +406,8 @@ int fpm_coop_container_start(const char *pool_name) /* {{{ */
 	if (zend_compile_file != compile_file) {
 		/* Another compile hook (disabled OPcache leaves its own, but inactive). */
 		zlog(ZLOG_NOTICE, "[pool %s] coop: zend_compile_file is hooked by an extension; "
-			"anything caching compiled scripts per process will misbehave with many requests in flight", pool_name);
+						  "anything caching compiled scripts per process will misbehave with many requests in flight",
+				pool_name);
 	}
 
 	{
@@ -418,7 +416,8 @@ int fpm_coop_container_start(const char *pool_name) /* {{{ */
 		if (shared && *shared == '1') {
 			fpm_coop_shared_includes = true;
 			zlog(ZLOG_NOTICE, "[pool %s] coop: EXPERIMENT — included_files shared per process "
-				"(require_once runs once per process, bootstrap does not redeclare classes)", pool_name);
+							  "(require_once runs once per process, bootstrap does not redeclare classes)",
+					pool_name);
 		}
 	}
 
@@ -429,8 +428,9 @@ int fpm_coop_container_start(const char *pool_name) /* {{{ */
 	if (zend_get_module_started("pcntl") == SUCCESS) {
 		zend_disable_functions(fpm_coop_disabled_functions);
 		zlog(ZLOG_NOTICE, "[pool %s] coop: ext/pcntl is loaded, disabled its process-wide functions (%s): "
-			"signal handlers, alarm, fork and exec act on the whole process, which here serves many requests at once; "
-			"see docs/fiber_errors.md", pool_name, fpm_coop_disabled_functions);
+						  "signal handlers, alarm, fork and exec act on the whole process, which here serves many requests at once; "
+						  "see docs/fiber_errors.md",
+				pool_name, fpm_coop_disabled_functions);
 	}
 
 	fpm_coop_orig_ub_write = sapi_module.ub_write;
@@ -534,8 +534,8 @@ fcgi_request *fpm_coop_accept_kept(fcgi_request *req, int *fd_out) /* {{{ */
 	 * portability where they differ. GCC -Wlogical-op flags the equality as
 	 * redundant — leave the idiom alone (docs/c-style.md, task 013). */
 #if defined(__GNUC__) && !defined(__clang__)
-# pragma GCC diagnostic push
-# pragma GCC diagnostic ignored "-Wlogical-op"
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wlogical-op"
 #endif
 	if (n <= 0 && !(n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK))) {
 		fcgi_finish_request(req, 1);
@@ -543,7 +543,7 @@ fcgi_request *fpm_coop_accept_kept(fcgi_request *req, int *fd_out) /* {{{ */
 		return NULL;
 	}
 #if defined(__GNUC__) && !defined(__clang__)
-# pragma GCC diagnostic pop
+#pragma GCC diagnostic pop
 #endif
 
 	/* If reading the request from this fd fails, fcgi_accept_request closes it
@@ -715,14 +715,18 @@ static void fpm_coop_execute(struct fpm_coop_req_s *ctx) /* {{{ */
 	 * to EG(symbol_table), so pretend the stack is empty while executing it. */
 	saved_execute_data = EG(current_execute_data);
 	EG(current_execute_data) = NULL;
-	zend_try {
+	zend_try
+	{
 		zend_execute_scripts(ZEND_REQUIRE, NULL, 1, &file_handle);
 		if (EG(exception)) {
 			zend_exception_error(EG(exception), E_ERROR);
 		}
-	} zend_catch {
+	}
+	zend_catch
+	{
 		EG(exit_status) = 255;
-	} zend_end_try();
+	}
+	zend_end_try();
 	if (EG(exception)) {
 		zend_clear_exception();
 	}
@@ -817,7 +821,7 @@ void fpm_coop_req_run(struct fpm_coop_req_s *ctx) /* {{{ */
 	EG(exit_status) = 0;
 
 	zlog(ZLOG_DEBUG, "[pool %s] coop: request #%u start (%s), in flight: %u",
-		fpm_coop_name, ctx->id, SG(request_info).request_uri ? SG(request_info).request_uri : "-", fpm_coop_in_flight_n);
+			fpm_coop_name, ctx->id, SG(request_info).request_uri ? SG(request_info).request_uri : "-", fpm_coop_in_flight_n);
 
 	/* 4. Script. */
 	fpm_coop_execute(ctx);
@@ -832,19 +836,27 @@ void fpm_coop_req_run(struct fpm_coop_req_s *ctx) /* {{{ */
 
 	/* 5. End like php_request_shutdown(): global-variable destructors (still in
 	 * the request context), output buffers, headers, FastCGI. */
-	zend_try {
+	zend_try
+	{
 		zend_hash_graceful_reverse_destroy(&EG(symbol_table));
-	} zend_end_try();
-	zend_try {
+	}
+	zend_end_try();
+	zend_try
+	{
 		php_output_end_all();
-	} zend_end_try();
-	zend_try {
-		php_output_deactivate();	/* send headers if they have not been sent */
-	} zend_end_try();
+	}
+	zend_end_try();
+	zend_try
+	{
+		php_output_deactivate(); /* send headers if they have not been sent */
+	}
+	zend_end_try();
 	if (!SG(headers_sent)) {
-		zend_try {
+		zend_try
+		{
 			sapi_send_headers();
-		} zend_end_try();
+		}
+		zend_end_try();
 	}
 
 	/* ini_set()/set_time_limit() in the script writes every changed entry to
@@ -891,7 +903,7 @@ void fpm_coop_req_run(struct fpm_coop_req_s *ctx) /* {{{ */
 	fcgi_finish_request(req, 0);
 
 	zlog(ZLOG_DEBUG, "[pool %s] coop: request #%u done, exit_status=%d, keep=%d",
-		fpm_coop_name, ctx->id, EG(exit_status), !fcgi_is_closed(req));
+			fpm_coop_name, ctx->id, EG(exit_status), !fcgi_is_closed(req));
 
 	/* 6. Clean up SG like sapi_deactivate_module()/sapi_deactivate_destroy()
 	 * — without sapi_module.deactivate (fpm_main.c: fcgi_finish_request is

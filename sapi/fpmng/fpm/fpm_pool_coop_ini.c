@@ -115,7 +115,8 @@ void fpm_coop_ini_req_leave(struct fpm_coop_req_s *ctx) /* {{{ */
 	ALLOC_HASHTABLE(values);
 	zend_hash_init(values, zend_hash_num_elements(EG(modified_ini_directives)), NULL, NULL, false);
 
-	ZEND_HASH_MAP_FOREACH_STR_KEY_PTR(EG(modified_ini_directives), name, entry) {
+	ZEND_HASH_MAP_FOREACH_STR_KEY_PTR(EG(modified_ini_directives), name, entry)
+	{
 		/* This request's OWN value — stash it by transferring the pointer. */
 		zend_hash_add_ptr(values, name, entry->value);
 
@@ -126,7 +127,8 @@ void fpm_coop_ini_req_leave(struct fpm_coop_req_s *ctx) /* {{{ */
 		entry->modified = false;
 		entry->orig_value = NULL;
 		entry->orig_modifiable = false;
-	} ZEND_HASH_FOREACH_END();
+	}
+	ZEND_HASH_FOREACH_END();
 
 	ctx->ini_values = values;
 	ctx->ini_mods = EG(modified_ini_directives);
@@ -144,7 +146,8 @@ void fpm_coop_ini_req_enter(struct fpm_coop_req_s *ctx) /* {{{ */
 		return;
 	}
 
-	ZEND_HASH_MAP_FOREACH_STR_KEY_PTR(ctx->ini_mods, name, entry) {
+	ZEND_HASH_MAP_FOREACH_STR_KEY_PTR(ctx->ini_mods, name, entry)
+	{
 		value = zend_hash_find_ptr(ctx->ini_values, name);
 
 		/* Exactly what zend_alter_ini_entry_ex does on the first modification
@@ -155,7 +158,8 @@ void fpm_coop_ini_req_enter(struct fpm_coop_req_s *ctx) /* {{{ */
 		entry->orig_modifiable = entry->modifiable;
 		entry->value = value;
 		entry->modified = true;
-	} ZEND_HASH_FOREACH_END();
+	}
+	ZEND_HASH_FOREACH_END();
 
 	/* ini_values are no longer needed — values were transferred above. Its
 	 * NULL destructor means destroy does not release anybody's strings. */
@@ -184,9 +188,11 @@ void fpm_coop_ini_req_free(struct fpm_coop_req_s *ctx) /* {{{ */
 	 * restored them before leaving — so only this request's orphaned values remain
 	 * to be released. */
 	if (ctx->ini_values) {
-		ZEND_HASH_MAP_FOREACH_PTR(ctx->ini_values, value) {
+		ZEND_HASH_MAP_FOREACH_PTR(ctx->ini_values, value)
+		{
 			zend_string_release(value);
-		} ZEND_HASH_FOREACH_END();
+		}
+		ZEND_HASH_FOREACH_END();
 		zend_hash_destroy(ctx->ini_values);
 		FREE_HASHTABLE(ctx->ini_values);
 		ctx->ini_values = NULL;

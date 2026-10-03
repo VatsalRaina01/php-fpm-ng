@@ -37,7 +37,7 @@
  * addrinfo so that clients do not include event2/. That is only the same
  * struct when libevent was built with the system one (every Linux build). */
 #ifndef EVENT__HAVE_STRUCT_ADDRINFO
-# error "fpm_pool_fiber_io.c assumes libevent's evutil_addrinfo is the system struct addrinfo"
+#error "fpm_pool_fiber_io.c assumes libevent's evutil_addrinfo is the system struct addrinfo"
 #endif
 
 static short fpm_fiber_io_to_ev(unsigned events) /* {{{ */
@@ -128,7 +128,7 @@ static enum fpm_fiber_io_completion fpm_fiber_io_wait_wake(struct fpm_fiber_io_o
 struct fpm_fiber_io_any_s {
 	struct fpm_fiber_io_poll_s *member;
 	void *waiter;
-	struct event *ev;	/* NULL once freed, or if never created (event_add failed) */
+	struct event *ev; /* NULL once freed, or if never created (event_add failed) */
 };
 
 static void fpm_fiber_io_any_cb(evutil_socket_t fd, short what, void *arg) /* {{{ */
@@ -257,7 +257,7 @@ static struct evdns_base *fpm_fiber_dns_base(void) /* {{{ */
 	fpm_fiber_dns = evdns_base_new(base, EVDNS_BASE_INITIALIZE_NAMESERVERS | EVDNS_BASE_DISABLE_WHEN_INACTIVE);
 	if (!fpm_fiber_dns) {
 		zlog(ZLOG_WARNING, "[pool %s] fiber: evdns_base_new() failed (no /etc/resolv.conf or no nameservers?); DNS stays blocking",
-			fpm_coop_pool_name());
+				fpm_coop_pool_name());
 		return NULL;
 	}
 	/* getaddrinfo does not use 0x20 randomization; resolvers that do not preserve
@@ -265,7 +265,7 @@ static struct evdns_base *fpm_fiber_dns_base(void) /* {{{ */
 	evdns_base_set_option(fpm_fiber_dns, "randomize-case", "0");
 
 	zlog(ZLOG_DEBUG, "[pool %s] fiber: async DNS via evdns, %d nameserver(s)",
-		fpm_coop_pool_name(), evdns_base_count_nameservers(fpm_fiber_dns));
+			fpm_coop_pool_name(), evdns_base_count_nameservers(fpm_fiber_dns));
 	return fpm_fiber_dns;
 }
 /* }}} */
@@ -273,7 +273,7 @@ static struct evdns_base *fpm_fiber_dns_base(void) /* {{{ */
 struct fpm_fiber_dns_req_s {
 	void *waiter;
 	struct evutil_addrinfo *res;
-	int result;			/* EVUTIL_EAI_* code (0 = ok) */
+	int result; /* EVUTIL_EAI_* code (0 = ok) */
 	bool done;
 };
 

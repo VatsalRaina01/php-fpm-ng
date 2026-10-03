@@ -126,7 +126,7 @@ static int fpm_fiber_intercept_validate_cb(const char *name, size_t len, void *a
 		off += (size_t) n;
 	}
 	zlog(ZLOG_ALERT, "[pool %s] fiber.disable_interceptions: unknown interception '%.*s'; known interceptions: %s",
-		wp->config->name, (int) len, name, known);
+			wp->config->name, (int) len, name, known);
 	return -1;
 }
 /* }}} */
@@ -142,7 +142,7 @@ static int fpm_fiber_intercept_disable_cb(const char *name, size_t len, void *ar
 	struct fpm_fiber_intercept_s *e = fpm_fiber_intercept_find(name, len);
 
 	(void) arg;
-	if (e) {	/* validate() already refused unknown names in the master */
+	if (e) { /* validate() already refused unknown names in the master */
 		e->disabled = true;
 	}
 	return 0;
@@ -160,7 +160,8 @@ void fpm_fiber_intercept_install_all(struct fpm_worker_pool_s *wp) /* {{{ */
 
 		if (e->disabled) {
 			zlog(ZLOG_NOTICE, "[pool %s] fiber: interception '%s' disabled by fiber.disable_interceptions; "
-				"its calls block the whole process, as on stock PHP", wp->config->name, e->name);
+							  "its calls block the whole process, as on stock PHP",
+					wp->config->name, e->name);
 			if (e->disabled_hazard) {
 				zlog(ZLOG_WARNING, "[pool %s] fiber: interception '%s' disabled: %s", wp->config->name, e->name, e->disabled_hazard);
 			}

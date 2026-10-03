@@ -43,17 +43,40 @@ int fpm_pool_fiber_validate(struct fpm_worker_pool_s *wp) /* {{{ */
 void fpm_pool_fiber_child_main(struct fpm_worker_pool_s *wp) /* {{{ */
 {
 	zlog(ZLOG_ALERT, "[pool %s] pool.executor = fiber: ZTS build, this should have been rejected by validate()",
-		wp->config->name);
+			wp->config->name);
 	exit(FPM_EXIT_SOFTWARE);
 }
 /* }}} */
 
-int fpm_pool_fiber_can_wait(void) { return 0; }
-int fpm_pool_fiber_wait_fd(int fd, short events, struct timeval *timeout, short *what) { (void) fd; (void) events; (void) timeout; (void) what; return -1; }
-void *fpm_pool_fiber_waiter(void) { return NULL; }
-int fpm_pool_fiber_wait_wake(struct timeval *timeout) { (void) timeout; return -1; }
-void fpm_pool_fiber_wake(void *waiter) { (void) waiter; }
-struct event_base *fpm_pool_fiber_event_base(void) { return NULL; }
+int fpm_pool_fiber_can_wait(void)
+{
+	return 0;
+}
+int fpm_pool_fiber_wait_fd(int fd, short events, struct timeval *timeout, short *what)
+{
+	(void) fd;
+	(void) events;
+	(void) timeout;
+	(void) what;
+	return -1;
+}
+void *fpm_pool_fiber_waiter(void)
+{
+	return NULL;
+}
+int fpm_pool_fiber_wait_wake(struct timeval *timeout)
+{
+	(void) timeout;
+	return -1;
+}
+void fpm_pool_fiber_wake(void *waiter)
+{
+	(void) waiter;
+}
+struct event_base *fpm_pool_fiber_event_base(void)
+{
+	return NULL;
+}
 
 #else /* !ZTS */
 
@@ -61,8 +84,8 @@ struct event_base *fpm_pool_fiber_event_base(void) { return NULL; }
 struct fpm_fiber_req_s {
 	struct fpm_coop_req_s *ctx;
 	zend_fiber *fiber;
-	struct event *ev;			/* one I/O event per request, attached for each wait */
-	short wait_result;			/* what woke it: EV_READ/EV_WRITE/EV_TIMEOUT */
+	struct event *ev; /* one I/O event per request, attached for each wait */
+	short wait_result; /* what woke it: EV_READ/EV_WRITE/EV_TIMEOUT */
 	bool waiting;
 };
 
@@ -153,7 +176,7 @@ static void fpm_fiber_after_switch(struct fpm_fiber_req_s *fr) /* {{{ */
 			 * Fiber::suspend() from user code in the request's main Fiber). Nobody
 			 * will wake it — treat this as a request ending with an error. */
 			zlog(ZLOG_WARNING, "[pool %s] fiber: request #%u suspended outside the scheduler (Fiber::suspend() in the request's main fiber?); dropping it",
-				fpm_coop_pool_name(), fr->ctx->id);
+					fpm_coop_pool_name(), fr->ctx->id);
 			/* SPIKE: this request will never reach release_owner() from
 			 * fpm_coop_req_run() again (it will not return there). If it held an
 			 * flock() from the registry, it would remain there FOREVER and block
@@ -266,7 +289,8 @@ static void fpm_fiber_switch_in(struct fpm_fiber_req_s *fr, bool start) /* {{{ *
 	fpm_coop_req_enter(fr->ctx);
 
 	ZVAL_UNDEF(&rv);
-	zend_try {
+	zend_try
+	{
 		if (start) {
 			fpm_fiber_starting = fr;
 			if (zend_fiber_start(fr->fiber, &rv) == FAILURE) {
@@ -275,11 +299,14 @@ static void fpm_fiber_switch_in(struct fpm_fiber_req_s *fr, bool start) /* {{{ *
 		} else {
 			zend_fiber_resume(fr->fiber, NULL, &rv);
 		}
-	} zend_catch {
+	}
+	zend_catch
+	{
 		/* A bailout escaped the Fiber (zend_fiber_switch_to passes it further).
 		 * fpm_coop_req_run has its own zend_try, so this is a failure. */
 		zlog(ZLOG_ERROR, "[pool %s] fiber: bailout escaped request #%u", fpm_coop_pool_name(), fr->ctx->id);
-	} zend_end_try();
+	}
+	zend_end_try();
 	zval_ptr_dtor(&rv);
 	if (EG(exception)) {
 		/* The Fiber threw (it should not: run() cleans up) — do not leave this
@@ -353,8 +380,7 @@ int fpm_pool_fiber_wait_fd(int fd, short events, struct timeval *timeout, short 
 	 * usleep, computation) — without refreshing it, 60 ms of work consumes a
 	 * 50 ms timeout and the wait ends immediately with "Operation timed out". */
 	event_base_update_cache_time(fpm_fiber_base);
-	if (event_assign(fr->ev, fpm_fiber_base, fd, events, fpm_fiber_io_cb, fr) < 0
-		|| event_add(fr->ev, timeout) < 0) {
+	if (event_assign(fr->ev, fpm_fiber_base, fd, events, fpm_fiber_io_cb, fr) < 0 || event_add(fr->ev, timeout) < 0) {
 		return -1;
 	}
 	fr->wait_result = 0;
@@ -396,9 +422,8 @@ int fpm_pool_fiber_wait_wake(struct timeval *timeout) /* {{{ */
 		return -1;
 	}
 
-	event_base_update_cache_time(fpm_fiber_base);	/* jak w wait_fd */
-	if (event_assign(fr->ev, fpm_fiber_base, -1, 0, fpm_fiber_io_cb, fr) < 0
-		|| (timeout && event_add(fr->ev, timeout) < 0)) {
+	event_base_update_cache_time(fpm_fiber_base); /* jak w wait_fd */
+	if (event_assign(fr->ev, fpm_fiber_base, -1, 0, fpm_fiber_io_cb, fr) < 0 || (timeout && event_add(fr->ev, timeout) < 0)) {
 		return -1;
 	}
 	fr->wait_result = 0;
@@ -443,7 +468,9 @@ static void fpm_fiber_accept_cb(evutil_socket_t fd, short what, void *arg) /* {{
 	fcgi_request *req;
 	int conn_fd = -1;
 
-	(void) fd; (void) what; (void) arg;
+	(void) fd;
+	(void) what;
+	(void) arg;
 
 	if (fcgi_in_shutdown()) {
 		event_base_loopbreak(fpm_fiber_base);
@@ -462,7 +489,9 @@ static void fpm_fiber_accept_cb(evutil_socket_t fd, short what, void *arg) /* {{
 
 static void fpm_fiber_tick_cb(evutil_socket_t fd, short what, void *arg) /* {{{ */
 {
-	(void) fd; (void) what; (void) arg;
+	(void) fd;
+	(void) what;
+	(void) arg;
 
 	/* SIGQUIT: fpm_signals.c sig_soft_quit closes the listening socket and
 	 * calls fcgi_terminate(); an event on the closed fd may never arrive. */
@@ -471,7 +500,7 @@ static void fpm_fiber_tick_cb(evutil_socket_t fd, short what, void *arg) /* {{{ 
 	}
 	if (fpm_fiber_draining) {
 		zlog(ZLOG_DEBUG, "[pool %s] fiber: draining, %u request(s) still in flight",
-			fpm_coop_pool_name(), fpm_coop_in_flight());
+				fpm_coop_pool_name(), fpm_coop_in_flight());
 	}
 }
 /* }}} */
@@ -512,7 +541,9 @@ static void fpm_fiber_reval_cb(evutil_socket_t fd, short what, void *arg) /* {{{
 	char why[160];
 	unsigned files, sweeps, stats;
 
-	(void) fd; (void) what; (void) arg;
+	(void) fd;
+	(void) what;
+	(void) arg;
 
 	if (fpm_fiber_draining || fcgi_in_shutdown()) {
 		return;
@@ -520,13 +551,13 @@ static void fpm_fiber_reval_cb(evutil_socket_t fd, short what, void *arg) /* {{{
 	if (fpm_coop_reval_sweep(&path, why, sizeof(why))) {
 		fpm_coop_reval_stats(&files, &sweeps, &stats);
 		zlog(ZLOG_NOTICE, "[pool %s] fiber: %s changed on disk (%s); worker will exit after %u request(s) in flight finish, master respawns it on fresh code",
-			fpm_coop_pool_name(), path, why, fpm_coop_in_flight());
+				fpm_coop_pool_name(), path, why, fpm_coop_in_flight());
 		fpm_fiber_drain_begin();
 		return;
 	}
 	fpm_coop_reval_stats(&files, &sweeps, &stats);
 	zlog(ZLOG_DEBUG, "[pool %s] fiber: revalidate sweep #%u, %u file(s) unchanged, %u stat() since start",
-		fpm_coop_pool_name(), sweeps, files, stats);
+			fpm_coop_pool_name(), sweeps, files, stats);
 }
 /* }}} */
 
@@ -573,11 +604,11 @@ void fpm_pool_fiber_child_main(struct fpm_worker_pool_s *wp) /* {{{ */
 		fpm_fiber_ev_reval = event_new(fpm_fiber_base, -1, EV_PERSIST, fpm_fiber_reval_cb, NULL);
 		event_add(fpm_fiber_ev_reval, &every);
 		zlog(ZLOG_NOTICE, "[pool %s] fiber: revalidate_freq = %ds, worker replaces itself when an included file changes on disk",
-			wp->config->name, wp->config->fiber_revalidate_freq);
+				wp->config->name, wp->config->fiber_revalidate_freq);
 	}
 
 	zlog(ZLOG_NOTICE, "[pool %s] fiber: child %d ready, PHP %s, libevent %s (%s), one process, N requests in flight",
-		wp->config->name, (int) getpid(), PHP_VERSION, event_get_version(), event_base_get_method(fpm_fiber_base));
+			wp->config->name, (int) getpid(), PHP_VERSION, event_get_version(), event_base_get_method(fpm_fiber_base));
 
 	event_base_dispatch(fpm_fiber_base);
 
@@ -586,10 +617,10 @@ void fpm_pool_fiber_child_main(struct fpm_worker_pool_s *wp) /* {{{ */
 
 		fpm_coop_reval_stats(&files, &sweeps, &stats);
 		zlog(ZLOG_NOTICE, "[pool %s] fiber: exiting for fresh code, %u request(s) in flight, %u file(s) tracked, %u sweep(s), %u stat() total",
-			wp->config->name, fpm_coop_in_flight(), files, sweeps, stats);
+				wp->config->name, fpm_coop_in_flight(), files, sweeps, stats);
 	} else {
 		zlog(ZLOG_NOTICE, "[pool %s] fiber: shutdown requested, %u request(s) in flight abandoned",
-			wp->config->name, fpm_coop_in_flight());
+				wp->config->name, fpm_coop_in_flight());
 	}
 
 	fpm_stdio_flush_child();

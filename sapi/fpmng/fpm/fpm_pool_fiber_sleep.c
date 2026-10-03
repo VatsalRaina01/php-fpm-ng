@@ -75,11 +75,11 @@ static int fpm_fiber_sleep_swap(const char *name, size_t name_len, zif_handler r
 static ZEND_FASTCALL void fpm_fiber_zif_sleep(INTERNAL_FUNCTION_PARAMETERS) /* {{{ */
 {
 	zend_long num;
-	const unsigned int max = UINT_MAX;	/* target platform: Linux, not Windows */
+	const unsigned int max = UINT_MAX; /* target platform: Linux, not Windows */
 	struct timeval tv, start, deadline;
 
 	ZEND_PARSE_PARAMETERS_START(1, 1)
-		Z_PARAM_LONG(num)
+	Z_PARAM_LONG(num)
 	ZEND_PARSE_PARAMETERS_END();
 
 	if (num < 0 || (zend_ulong) num > max) {
@@ -132,7 +132,7 @@ static ZEND_FASTCALL void fpm_fiber_zif_usleep(INTERNAL_FUNCTION_PARAMETERS) /* 
 	struct timeval tv;
 
 	ZEND_PARSE_PARAMETERS_START(1, 1)
-		Z_PARAM_LONG(num)
+	Z_PARAM_LONG(num)
 	ZEND_PARSE_PARAMETERS_END();
 
 	if (num < 0 || (zend_ulong) num > UINT_MAX) {
@@ -166,8 +166,8 @@ static ZEND_FASTCALL void fpm_fiber_zif_time_nanosleep(INTERNAL_FUNCTION_PARAMET
 	enum fpm_fiber_io_completion done;
 
 	ZEND_PARSE_PARAMETERS_START(2, 2)
-		Z_PARAM_LONG(tv_sec)
-		Z_PARAM_LONG(tv_nsec)
+	Z_PARAM_LONG(tv_sec)
+	Z_PARAM_LONG(tv_nsec)
 	ZEND_PARSE_PARAMETERS_END();
 
 	if (tv_sec < 0) {

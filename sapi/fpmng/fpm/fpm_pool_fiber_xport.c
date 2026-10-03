@@ -133,7 +133,7 @@ static int fpm_fiber_ready_now(int fd, int pollev) /* {{{ */
 	do {
 		r = php_pollfd_for_ms(fd, pollev, 0);
 	} while (r < 0 && errno == EINTR);
-	return r != 0;	/* >0 ready; <0 error — let the original operation report it */
+	return r != 0; /* >0 ready; <0 error — let the original operation report it */
 }
 /* }}} */
 
@@ -185,11 +185,12 @@ static int fpm_fiber_wait_sock(php_netstream_data_t *sock, int pollev, unsigned 
 /* }}} */
 
 /* Delegate while restoring the ops identity. */
-#define FPM_FIBER_DELEGATE(stream, orig, call) do { \
+#define FPM_FIBER_DELEGATE(stream, orig, call)           \
+	do {                                                 \
 		const php_stream_ops *fpm_wrap_ = (stream)->ops; \
-		(stream)->ops = (orig); \
-		call; \
-		(stream)->ops = fpm_wrap_; \
+		(stream)->ops = (orig);                          \
+		call;                                            \
+		(stream)->ops = fpm_wrap_;                       \
 	} while (0)
 
 static ssize_t fpm_fiber_xop_read(php_stream *stream, char *buf, size_t count) /* {{{ */
@@ -273,9 +274,9 @@ static int fpm_fiber_xop_stat(php_stream *stream, php_stream_statbuf *ssb) /* {{
 
 enum fpm_fiber_dns_status {
 	FPM_FIBER_DNS_OK,
-	FPM_FIBER_DNS_FAIL,		/* *gai_err for fpm_fiber_io_gai_strerror */
-	FPM_FIBER_DNS_TIMEOUT,	/* connect timeout elapsed */
-	FPM_FIBER_DNS_NOWAIT	/* could not wait, or no async resolver; caller must block */
+	FPM_FIBER_DNS_FAIL, /* *gai_err for fpm_fiber_io_gai_strerror */
+	FPM_FIBER_DNS_TIMEOUT, /* connect timeout elapsed */
+	FPM_FIBER_DNS_NOWAIT /* could not wait, or no async resolver; caller must block */
 };
 
 /* Resolve a name without blocking the process. The caller frees the result
@@ -429,7 +430,7 @@ static int fpm_fiber_xop_connect_once(php_stream *stream, const php_stream_ops *
 	xparam->op = STREAM_XPORT_OP_CONNECT;
 
 	if (ret != PHP_STREAM_OPTION_RETURN_OK || xparam->outputs.returncode != 1) {
-		return ret;	/* connected immediately (returncode 0) or failed (-1) */
+		return ret; /* connected immediately (returncode 0) or failed (-1) */
 	}
 
 	sock = (php_netstream_data_t *) stream->abstract;
@@ -507,7 +508,7 @@ static int fpm_fiber_xop_connect(php_stream *stream, const struct fpm_fiber_ops_
 			return PHP_STREAM_OPTION_RETURN_OK;
 		case FPM_FIBER_DNS_FAIL:
 			fpm_fiber_dns_report(xparam, host, fpm_fiber_io_gai_strerror(gai_err));
-			xparam->outputs.error_code = 0;	/* as upstream: getaddrinfo does not set the stream errno */
+			xparam->outputs.error_code = 0; /* as upstream: getaddrinfo does not set the stream errno */
 			efree(host);
 			return PHP_STREAM_OPTION_RETURN_OK;
 		case FPM_FIBER_DNS_OK:
@@ -529,7 +530,7 @@ static int fpm_fiber_xop_connect(php_stream *stream, const struct fpm_fiber_ops_
 			}
 			if (timeout) {
 				if (!fpm_fiber_time_left(&deadline, &left)) {
-					break;	/* expired: do not try further addresses (upstream: fatal) */
+					break; /* expired: do not try further addresses (upstream: fatal) */
 				}
 				xparam->inputs.timeout = &left;
 			}
@@ -553,7 +554,7 @@ static int fpm_fiber_xop_connect(php_stream *stream, const struct fpm_fiber_ops_
 		/* No address could even be tried (unsupported families, or the deadline
 		 * expired before the first attempt). */
 		xparam->outputs.error_text = strpprintf(0, "php_network_getaddresses: getaddrinfo for %s failed: %s", host,
-			timeout && !fpm_fiber_time_left(&deadline, &left) ? "timed out" : "no usable address");
+				timeout && !fpm_fiber_time_left(&deadline, &left) ? "timed out" : "no usable address");
 	}
 
 	fpm_fiber_io_freeaddrinfo(res);
@@ -589,7 +590,7 @@ static const php_stream_ops *fpm_fiber_wrap_ops(const php_stream_ops *orig, bool
 			return &fpm_fiber_ops_map[i].wrap;
 		}
 		if (&fpm_fiber_ops_map[i].wrap == orig) {
-			return orig;	/* already wrapped */
+			return orig; /* already wrapped */
 		}
 	}
 	if (fpm_fiber_ops_count == FPM_FIBER_OPS_MAX) {
@@ -651,22 +652,22 @@ static php_stream *fpm_fiber_xport_factory_ex(php_stream_transport_factory orig_
 			/* Do NOT log persistent_id: PDO builds this key from the DSN together
 			 * with the username and password, so it would end up in the error log. */
 			zlog(ZLOG_NOTICE, "[pool %s] fiber: refused a persistent stream; "
-				"the persistent stream list is per process while this process serves many "
-				"requests at once, so two requests could share one socket. Measured with "
-				"PDO::ATTR_PERSISTENT: hung requests, 502s and a dead worker. Drop "
-				"PDO::ATTR_PERSISTENT or the \"p:\" prefix — see docs/fiber_errors.md",
-				fpm_coop_pool_name());
+							  "the persistent stream list is per process while this process serves many "
+							  "requests at once, so two requests could share one socket. Measured with "
+							  "PDO::ATTR_PERSISTENT: hung requests, 502s and a dead worker. Drop "
+							  "PDO::ATTR_PERSISTENT or the \"p:\" prefix — see docs/fiber_errors.md",
+					fpm_coop_pool_name());
 		}
 		php_error_docref(NULL, E_WARNING,
-			"persistent connections are not supported with pool.executor = fiber: "
-			"the persistent stream list is per process while this process serves many "
-			"requests at once, so two requests could share one socket (see "
-			"docs/fiber_errors.md); drop PDO::ATTR_PERSISTENT or the \"p:\" prefix");
+				"persistent connections are not supported with pool.executor = fiber: "
+				"the persistent stream list is per process while this process serves many "
+				"requests at once, so two requests could share one socket (see "
+				"docs/fiber_errors.md); drop PDO::ATTR_PERSISTENT or the \"p:\" prefix");
 		return NULL;
 	}
 
 	stream = orig_factory(proto, protolen, resourcename, resourcenamelen,
-		persistent_id, options, flags, timeout, context STREAMS_REL_CC);
+			persistent_id, options, flags, timeout, context STREAMS_REL_CC);
 
 	if (stream) {
 		const php_stream_ops *wrap = fpm_fiber_wrap_ops(stream->ops, dns);
@@ -686,7 +687,7 @@ static php_stream *fpm_fiber_tcp_factory(const char *proto, size_t protolen,
 		php_stream_context *context STREAMS_DC) /* {{{ */
 {
 	return fpm_fiber_xport_factory_ex(fpm_fiber_orig_tcp_factory, true, proto, protolen, resourcename, resourcenamelen,
-		persistent_id, options, flags, timeout, context STREAMS_REL_CC);
+			persistent_id, options, flags, timeout, context STREAMS_REL_CC);
 }
 /* }}} */
 
@@ -697,7 +698,7 @@ static php_stream *fpm_fiber_unix_factory(const char *proto, size_t protolen,
 		php_stream_context *context STREAMS_DC) /* {{{ */
 {
 	return fpm_fiber_xport_factory_ex(fpm_fiber_orig_unix_factory, false, proto, protolen, resourcename, resourcenamelen,
-		persistent_id, options, flags, timeout, context STREAMS_REL_CC);
+			persistent_id, options, flags, timeout, context STREAMS_REL_CC);
 }
 /* }}} */
 
@@ -730,8 +731,8 @@ int fpm_fiber_xport_tls_active(void) /* {{{ */
 int fpm_fiber_xport_tls_wait(php_socket_t fd, int poll_events, struct timeval *timeout) /* {{{ */
 {
 	unsigned ev = (poll_events & POLLOUT)
-		? ((poll_events & POLLIN) ? (FPM_FIBER_IO_READ | FPM_FIBER_IO_WRITE) : FPM_FIBER_IO_WRITE)
-		: FPM_FIBER_IO_READ;
+						  ? ((poll_events & POLLIN) ? (FPM_FIBER_IO_READ | FPM_FIBER_IO_WRITE) : FPM_FIBER_IO_WRITE)
+						  : FPM_FIBER_IO_READ;
 
 	return fpm_fiber_wait_fd(fd, ev, timeout);
 }
@@ -755,8 +756,8 @@ static void fpm_pool_fiber_xport_install(void) /* {{{ */
 #endif
 
 	zlog(ZLOG_DEBUG, "[pool %s] fiber: stream transports hooked: tcp=%s unix=%s",
-		fpm_coop_pool_name(),
-		fpm_fiber_orig_tcp_factory ? (fpm_fiber_orig_tcp_factory == php_stream_generic_socket_factory ? "generic" : "other (openssl?)") : "none",
-		fpm_fiber_orig_unix_factory ? "generic" : "none");
+			fpm_coop_pool_name(),
+			fpm_fiber_orig_tcp_factory ? (fpm_fiber_orig_tcp_factory == php_stream_generic_socket_factory ? "generic" : "other (openssl?)") : "none",
+			fpm_fiber_orig_unix_factory ? "generic" : "none");
 }
 /* }}} */

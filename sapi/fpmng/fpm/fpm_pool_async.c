@@ -41,30 +41,30 @@
  * Upstream does not have it, so the macro remains undefined and child_main is
  * never called (validate rejects the pool). */
 #if defined(__has_include)
-# if __has_include("zend_async_API.h")
-#  include "zend_async_API.h"
-#  define FPMNG_ASYNC_ENGINE 1
-# endif
+#if __has_include("zend_async_API.h")
+#include "zend_async_API.h"
+#define FPMNG_ASYNC_ENGINE 1
+#endif
 #endif
 
 /* The POC operates directly on sapi_globals (memcpy), which makes sense only in NTS. */
 #if defined(FPMNG_ASYNC_ENGINE) && defined(ZTS)
-# undef FPMNG_ASYNC_ENGINE
-# define FPMNG_ASYNC_NO_ZTS 1
+#undef FPMNG_ASYNC_ENGINE
+#define FPMNG_ASYNC_NO_ZTS 1
 #endif
 
 const char *const fpm_pool_async_rejects[] = {
-	"pm.max_requests",			/* request counts are not tracked per process */
-	"request_terminate_timeout",		/* the scoreboard does not see coroutine requests */
+	"pm.max_requests", /* request counts are not tracked per process */
+	"request_terminate_timeout", /* the scoreboard does not see coroutine requests */
 	"request_terminate_timeout_track_finished",
 	"request_slowlog_timeout",
 	"request_slowlog_trace_depth",
 	"slowlog",
-	"ping.",				/* ping is handled by the fpm_main.c loop, not us */
-	"pm.status_path",			/* so is upstream's FastCGI status page */
-	"http.",				/* http.* tunes a gateway; this pool is a gateway's target, not one */
-	"fiber.",				/* worker replacement after file changes lives in the Fiber scheduler */
-	"worker.",				/* worker.* means pool.executor = worker, a different executor entirely (issue #331) */
+	"ping.", /* ping is handled by the fpm_main.c loop, not us */
+	"pm.status_path", /* so is upstream's FastCGI status page */
+	"http.", /* http.* tunes a gateway; this pool is a gateway's target, not one */
+	"fiber.", /* worker replacement after file changes lives in the Fiber scheduler */
+	"worker.", /* worker.* means pool.executor = worker, a different executor entirely (issue #331) */
 	NULL
 };
 
@@ -74,8 +74,8 @@ int fpm_pool_async_validate(struct fpm_worker_pool_s *wp) /* {{{ */
 	 * shares process-wide request state without the guards used by fiber. Do not
 	 * let a True Async build turn this experimental POC into a supported pool. */
 	zlog(ZLOG_ALERT, "[pool %s] pool.executor = async is disabled: it is not hardened "
-		"for concurrent requests; use pool.executor = classic or fiber until async parity is implemented",
-		wp->config->name);
+					 "for concurrent requests; use pool.executor = classic or fiber until async parity is implemented",
+			wp->config->name);
 	return -1;
 }
 /* }}} */
@@ -85,7 +85,7 @@ int fpm_pool_async_validate(struct fpm_worker_pool_s *wp) /* {{{ */
 void fpm_pool_async_child_main(struct fpm_worker_pool_s *wp) /* {{{ */
 {
 	zlog(ZLOG_ALERT, "[pool %s] pool.executor = async: engine without True Async API, this should have been rejected by validate()",
-		wp->config->name);
+			wp->config->name);
 	exit(FPM_EXIT_SOFTWARE);
 }
 /* }}} */
@@ -97,12 +97,12 @@ static const struct {
 	const char *name;
 	size_t len;
 } fpm_async_superglobals[] = {
-	{ "_SERVER",  sizeof("_SERVER") - 1 },
-	{ "_GET",     sizeof("_GET") - 1 },
-	{ "_POST",    sizeof("_POST") - 1 },
-	{ "_COOKIE",  sizeof("_COOKIE") - 1 },
-	{ "_FILES",   sizeof("_FILES") - 1 },
-	{ "_ENV",     sizeof("_ENV") - 1 },
+	{ "_SERVER", sizeof("_SERVER") - 1 },
+	{ "_GET", sizeof("_GET") - 1 },
+	{ "_POST", sizeof("_POST") - 1 },
+	{ "_COOKIE", sizeof("_COOKIE") - 1 },
+	{ "_FILES", sizeof("_FILES") - 1 },
+	{ "_ENV", sizeof("_ENV") - 1 },
 	{ "_REQUEST", sizeof("_REQUEST") - 1 },
 };
 #define FPM_ASYNC_NSG (sizeof(fpm_async_superglobals) / sizeof(fpm_async_superglobals[0]))
@@ -110,10 +110,10 @@ static const struct {
 /* State of one in-flight request. */
 struct fpm_async_req_s {
 	fcgi_request *req;
-	sapi_globals_struct sg;			/* this coroutine's SG while off the processor */
-	HashTable symbol_table;			/* this coroutine's EG(symbol_table) while off the processor */
-	HashTable included_files;		/* this coroutine's EG(included_files), likewise */
-	bool tables_live;			/* symbol_table/included_files initialized and not yet destroyed */
+	sapi_globals_struct sg; /* this coroutine's SG while off the processor */
+	HashTable symbol_table; /* this coroutine's EG(symbol_table) while off the processor */
+	HashTable included_files; /* this coroutine's EG(included_files), likewise */
+	bool tables_live; /* symbol_table/included_files initialized and not yet destroyed */
 	unsigned id;
 };
 
@@ -357,7 +357,7 @@ static void fpm_async_worker_entry(void) /* {{{ */
 	ZEND_COROUTINE_ADD_SWITCH_HANDLER(self, fpm_async_switch_handler);
 
 	zlog(ZLOG_DEBUG, "[pool %s] async: request #%u start (%s), in flight: %u",
-		fpm_async_pool_name, ctx->id, SG(request_info).request_uri ? SG(request_info).request_uri : "-", fpm_async_in_flight);
+			fpm_async_pool_name, ctx->id, SG(request_info).request_uri ? SG(request_info).request_uri : "-", fpm_async_in_flight);
 
 	EG(exit_status) = 0;
 
@@ -379,16 +379,20 @@ static void fpm_async_worker_entry(void) /* {{{ */
 		 * EG(symbol_table), so pretend the stack is empty while executing it. */
 		zend_execute_data *saved_execute_data = EG(current_execute_data);
 		EG(current_execute_data) = NULL;
-		zend_try {
+		zend_try
+		{
 			zend_execute_scripts(ZEND_REQUIRE, NULL, 1, &file_handle);
 			if (EG(exception)) {
 				/* zend_execute_script in the fork skips zend_exception_error inside
 				 * the coroutine (Zend/zend.c), so do it ourselves — as FPM does: fatal, 255. */
 				zend_exception_error(EG(exception), E_ERROR);
 			}
-		} zend_catch {
+		}
+		zend_catch
+		{
 			EG(exit_status) = 255;
-		} zend_end_try();
+		}
+		zend_end_try();
 		EG(current_execute_data) = saved_execute_data;
 
 		zend_destroy_file_handle(&file_handle);
@@ -396,13 +400,17 @@ static void fpm_async_worker_entry(void) /* {{{ */
 
 	/* Headers (if nothing was output) + SAPI flush — like php_request_shutdown
 	 * -> php_output_end_all. */
-	zend_try {
+	zend_try
+	{
 		if (!SG(headers_sent)) {
 			sapi_send_headers();
 		}
 		sapi_flush();
-	} zend_catch {
-	} zend_end_try();
+	}
+	zend_catch
+	{
+	}
+	zend_end_try();
 
 	/* POC: no keep-alive at the pool level — close the connection after the
 	 * response. Keep-alive would require asynchronous waiting for the next
@@ -411,7 +419,7 @@ static void fpm_async_worker_entry(void) /* {{{ */
 	fcgi_finish_request(req, 0);
 
 	zlog(ZLOG_DEBUG, "[pool %s] async: request #%u done, exit_status=%d",
-		fpm_async_pool_name, ctx->id, EG(exit_status));
+			fpm_async_pool_name, ctx->id, EG(exit_status));
 
 	fpm_async_request_deactivate(ctx);
 	fcgi_destroy_request(req);
@@ -534,7 +542,7 @@ void fpm_pool_async_child_main(struct fpm_worker_pool_s *wp) /* {{{ */
 
 	if (!ZEND_ASYNC_IS_READY) {
 		zlog(ZLOG_ERROR, "[pool %s] async: ext/async did not initialize in RINIT (state=%d)",
-			wp->config->name, (int) ZEND_ASYNC_G(state));
+				wp->config->name, (int) ZEND_ASYNC_G(state));
 		exit(FPM_EXIT_SOFTWARE);
 	}
 
@@ -550,7 +558,7 @@ void fpm_pool_async_child_main(struct fpm_worker_pool_s *wp) /* {{{ */
 	acceptor->extended_data = (void *) (intptr_t) listen_fd;
 
 	zlog(ZLOG_NOTICE, "[pool %s] async: child %d ready, engine %s, one process, N requests in flight",
-		wp->config->name, (int) getpid(), ZEND_ASYNC_API);
+			wp->config->name, (int) getpid(), ZEND_ASYNC_API);
 
 	/* Main coroutine: wake once per second to notice SIGTERM/SIGQUIT
 	 * (fpm_signals.c -> fpm_php_soft_quit -> fcgi_terminate). Everything else
@@ -564,7 +572,7 @@ void fpm_pool_async_child_main(struct fpm_worker_pool_s *wp) /* {{{ */
 
 		if (fcgi_in_shutdown()) {
 			zlog(ZLOG_NOTICE, "[pool %s] async: shutdown requested, %u request(s) in flight abandoned",
-				wp->config->name, fpm_async_in_flight);
+					wp->config->name, fpm_async_in_flight);
 			break;
 		}
 	}

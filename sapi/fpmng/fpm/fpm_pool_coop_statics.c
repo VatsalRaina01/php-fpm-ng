@@ -251,8 +251,8 @@ struct fpm_coop_static_item {
 	size_t class_lower_len;
 	char *prop_name;
 	size_t prop_len;
-	char label[192];	/* "Class::property" as configured, for logs */
-	bool warned;		/* logged the runtime "not found" warning once already */
+	char label[192]; /* "Class::property" as configured, for logs */
+	bool warned; /* logged the runtime "not found" warning once already */
 };
 
 static struct fpm_coop_static_item fpm_coop_statics_items[FPM_COOP_STATICS_MAX];
@@ -288,10 +288,10 @@ static char *fpm_coop_statics_strdup_lower(const char *s, size_t len) /* {{{ */
  * (container_start). Returns 0, or -1 on a syntax error (message already
  * logged into *errbuf). */
 typedef void (*fpm_coop_statics_cb)(const char *class_name, size_t class_len,
-	const char *prop_name, size_t prop_len, void *ctx);
+		const char *prop_name, size_t prop_len, void *ctx);
 
 static int fpm_coop_statics_foreach(const char *raw, fpm_coop_statics_cb cb, void *cb_ctx,
-	char *errbuf, size_t errbuf_len) /* {{{ */
+		char *errbuf, size_t errbuf_len) /* {{{ */
 {
 	char *copy, *save, *tok;
 	int n = 0;
@@ -335,9 +335,13 @@ static int fpm_coop_statics_foreach(const char *raw, fpm_coop_statics_cb cb, voi
 /* }}} */
 
 static void fpm_coop_statics_validate_cb(const char *class_name, size_t class_len,
-	const char *prop_name, size_t prop_len, void *cb_ctx) /* {{{ */
+		const char *prop_name, size_t prop_len, void *cb_ctx) /* {{{ */
 {
-	(void) class_name; (void) class_len; (void) prop_name; (void) prop_len; (void) cb_ctx;
+	(void) class_name;
+	(void) class_len;
+	(void) prop_name;
+	(void) prop_len;
+	(void) cb_ctx;
 	/* Syntax already checked by the caller; nothing else to do here at
 	 * validate time -- see the file header for why class/property
 	 * existence cannot be checked yet. */
@@ -352,7 +356,7 @@ int fpm_coop_statics_validate(struct fpm_worker_pool_s *wp) /* {{{ */
 		return 0;
 	}
 	if (fpm_coop_statics_foreach(wp->config->fiber_isolate_statics, fpm_coop_statics_validate_cb, NULL,
-			errbuf, sizeof(errbuf)) != 0) {
+				errbuf, sizeof(errbuf)) != 0) {
 		zlog(ZLOG_ALERT, "[pool %s] fiber.isolate_statics: %s", wp->config->name, errbuf);
 		return -1;
 	}
@@ -361,7 +365,7 @@ int fpm_coop_statics_validate(struct fpm_worker_pool_s *wp) /* {{{ */
 /* }}} */
 
 static void fpm_coop_statics_build_cb(const char *class_name, size_t class_len,
-	const char *prop_name, size_t prop_len, void *cb_ctx) /* {{{ */
+		const char *prop_name, size_t prop_len, void *cb_ctx) /* {{{ */
 {
 	const char *pool_name = (const char *) cb_ctx;
 	struct fpm_coop_static_item *item = &fpm_coop_statics_items[fpm_coop_statics_count];
@@ -395,20 +399,21 @@ void fpm_coop_statics_container_start(const char *pool_name) /* {{{ */
 	}
 
 	if (fpm_coop_statics_foreach(wp->config->fiber_isolate_statics, fpm_coop_statics_build_cb,
-			(void *) pool_name, errbuf, sizeof(errbuf)) != 0) {
+				(void *) pool_name, errbuf, sizeof(errbuf)) != 0) {
 		/* Cannot happen: fpm_coop_statics_validate() already rejected this
 		 * exact string on the master side. If it ever does (a future
 		 * change desyncs the two checks), fail safe -- no isolation,
 		 * loudly -- rather than run with a half-built item list. */
 		zlog(ZLOG_ALERT, "[pool %s] coop-statics: '%s' passed validate() but not container_start() (%s) -- "
-			"isolation of class statics DISABLED for this pool", pool_name,
-			wp->config->fiber_isolate_statics, errbuf);
+						 "isolation of class statics DISABLED for this pool",
+				pool_name,
+				wp->config->fiber_isolate_statics, errbuf);
 		fpm_coop_statics_count = 0;
 		return;
 	}
 
 	zlog(ZLOG_NOTICE, "[pool %s] coop-statics: per-request isolation of %d class static propert%s ENABLED",
-		pool_name, fpm_coop_statics_count, fpm_coop_statics_count == 1 ? "y" : "ies");
+			pool_name, fpm_coop_statics_count, fpm_coop_statics_count == 1 ? "y" : "ies");
 }
 /* }}} */
 
@@ -436,7 +441,8 @@ static bool fpm_coop_statics_resolve(struct fpm_coop_static_item *item, zval **s
 	if (!info || !(info->flags & ZEND_ACC_STATIC)) {
 		if (!item->warned) {
 			zlog(ZLOG_WARNING, "[pool %s] coop-statics: %s -- class loaded but no such static property; "
-				"isolation skipped for this item, request runs unisolated for it", fpm_coop_pool_name(), item->label);
+							   "isolation skipped for this item, request runs unisolated for it",
+					fpm_coop_pool_name(), item->label);
 			item->warned = true;
 		}
 		return false;
@@ -444,10 +450,10 @@ static bool fpm_coop_statics_resolve(struct fpm_coop_static_item *item, zval **s
 	/* Resolve through the DECLARING class (info->ce), never through the
 	 * configured one -- see file header, inherited-statics discussion. */
 	if (!(info->ce->ce_flags & ZEND_ACC_CONSTANTS_UPDATED)) {
-		return false;	/* default_static_members_table may still hold an unresolved IS_CONSTANT_AST */
+		return false; /* default_static_members_table may still hold an unresolved IS_CONSTANT_AST */
 	}
 	if (CE_STATIC_MEMBERS(info->ce) == NULL) {
-		return false;	/* not yet initialised on this process; not an error */
+		return false; /* not yet initialised on this process; not an error */
 	}
 	*slot_out = CE_STATIC_MEMBERS(info->ce) + info->offset;
 	ZVAL_DEINDIRECT(*slot_out);
@@ -485,8 +491,8 @@ void fpm_coop_statics_req_leave(struct fpm_coop_req_s *ctx) /* {{{ */
 				 * it; do not move it again. */
 				if (!fpm_coop_statics_items[i].warned) {
 					zlog(ZLOG_WARNING, "[pool %s] coop-statics: %s resolves to the same property as %s -- "
-						"configured twice under different names, isolating it once",
-						fpm_coop_pool_name(), fpm_coop_statics_items[i].label, fpm_coop_statics_items[j].label);
+									   "configured twice under different names, isolating it once",
+							fpm_coop_pool_name(), fpm_coop_statics_items[i].label, fpm_coop_statics_items[j].label);
 					fpm_coop_statics_items[i].warned = true;
 				}
 				slot = NULL;

@@ -43,50 +43,50 @@ static int fpm_pool_type_coop_fiber_validate(struct fpm_worker_pool_s *wp)
  * instead. */
 #ifdef HAVE_FPMNG_FIBER
 static const struct fpm_pool_type_s fpm_pool_fastcgi_fiber = {
-	.name                         = "fastcgi",
+	.name = "fastcgi",
 	/* Issue #295. Experimental, and the tracker is the argument: #79, #80,
 	 * #82, #84 and #85 are open correctness bugs against this executor's
 	 * request isolation, and criterion 3 of the bar in #269 ("no open
 	 * correctness issue") is therefore not met. It is also behind a
 	 * default-off configure flag, so nobody is running it by accident. */
-	.tier                         = FPM_TIER_EXPERIMENTAL,
-	.requires_listen              = 1,
-	.requires_pm                  = 1,
-	.serves_requests              = 1,
-	.serves_fastcgi               = 1,
+	.tier = FPM_TIER_EXPERIMENTAL,
+	.requires_listen = 1,
+	.requires_pm = 1,
+	.serves_requests = 1,
+	.serves_fastcgi = 1,
 	.listening_socket_nonblocking = 1,
-	.baseline_counter             = "requests",
-	.operator_endpoint            = 1,
-	.rejects                      = fpm_coop_rejects,
-	.validate                     = fpm_pool_type_coop_fiber_validate,
-	.child_main                   = fpm_pool_fiber_child_main,
+	.baseline_counter = "requests",
+	.operator_endpoint = 1,
+	.rejects = fpm_coop_rejects,
+	.validate = fpm_pool_type_coop_fiber_validate,
+	.child_main = fpm_pool_fiber_child_main,
 	/* What the gateway sizes its upstream budget towards this pool by, per
 	 * child. The number is the one the first http-fiber POC (e441814) gave
 	 * its gateway, there for the whole pool and overridable through
 	 * FPM_HTTP_MAX_UPSTREAMS; it was never measured, and the child itself
 	 * does not enforce it. */
-	.requests_per_child           = 128,
+	.requests_per_child = 128,
 };
 #endif /* HAVE_FPMNG_FIBER */
 
 #ifdef HAVE_FPMNG_ASYNC
 static const struct fpm_pool_type_s fpm_pool_fastcgi_async = {
-	.name                   = "fastcgi",
+	.name = "fastcgi",
 	/* Issue #295. Experimental, one criterion short of beta in a way that is
 	 * cheap to state: no cell in CI builds --enable-fpmng-async at all (see
 	 * build-matrix.yml and issue #87), so criterion 1 of #269's bar -- tests
 	 * on every PR -- has nothing behind it here. */
-	.tier                   = FPM_TIER_EXPERIMENTAL,
-	.requires_listen        = 1,
-	.requires_pm            = 1,
-	.serves_requests        = 1,
-	.serves_fastcgi         = 1,
-	.baseline_counter       = "requests",
-	.operator_endpoint      = 1,
-	.rejects                = fpm_pool_async_rejects,
-	.validate               = fpm_pool_async_validate,
-	.child_main             = fpm_pool_async_child_main,
-	.requests_per_child     = 128,
+	.tier = FPM_TIER_EXPERIMENTAL,
+	.requires_listen = 1,
+	.requires_pm = 1,
+	.serves_requests = 1,
+	.serves_fastcgi = 1,
+	.baseline_counter = "requests",
+	.operator_endpoint = 1,
+	.rejects = fpm_pool_async_rejects,
+	.validate = fpm_pool_async_validate,
+	.child_main = fpm_pool_async_child_main,
+	.requests_per_child = 128,
 };
 #endif /* HAVE_FPMNG_ASYNC */
 

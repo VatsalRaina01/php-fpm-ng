@@ -52,18 +52,18 @@
  * the same state lives in engine globals and this structure is stale. */
 struct fpm_coop_req_s {
 	fcgi_request *req;
-	int fd;					/* connection descriptor (fcgi_request is opaque) */
+	int fd; /* connection descriptor (fcgi_request is opaque) */
 	unsigned id;
 
-	sapi_globals_struct sg;			/* complete SG */
-	zend_output_globals og;			/* ob_* stack, output flags */
+	sapi_globals_struct sg; /* complete SG */
+	zend_output_globals og; /* ob_* stack, output flags */
 
 	/* The following exist only from the start of fpm_coop_req_run() to its end
 	 * (live). */
 	bool live;
-	HashTable symbol_table;			/* $GLOBALS for this request */
+	HashTable symbol_table; /* $GLOBALS for this request */
 	HashTable included_files;
-	zval http_globals[NUM_TRACK_VARS];	/* PG(http_globals): $_GET, $_POST, ... */
+	zval http_globals[NUM_TRACK_VARS]; /* PG(http_globals): $_GET, $_POST, ... */
 	zval user_error_handler;
 	zval user_exception_handler;
 	int user_error_handler_error_reporting;
@@ -84,8 +84,8 @@ struct fpm_coop_req_s {
 	 * fpm_pool_coop_ini.[ch]. Both are NULL until the request suspends with a
 	 * non-empty EG(modified_ini_directives) — so for the VAST MAJORITY of Fiber
 	 * switches (without ini_set/set_time_limit/...) the cost is zero. */
-	HashTable *ini_mods;			/* name -> zend_ini_entry* (same table as EG(modified_ini_directives)) */
-	HashTable *ini_values;			/* name -> zend_string*: this request's OWN value */
+	HashTable *ini_mods; /* name -> zend_ini_entry* (same table as EG(modified_ini_directives)) */
+	HashTable *ini_values; /* name -> zend_string*: this request's OWN value */
 
 	/* Values stashed from fiber.isolate_statics (fpm_pool_coop_statics.c)
 	 * while this request is not live. Array of zval, one per configured item,
@@ -93,7 +93,7 @@ struct fpm_coop_req_s {
 	 * list allocates it (empty list, the default: never). */
 	void *statics;
 
-	void *type_data;			/* pool-type private data (Fiber: zend_fiber + event) */
+	void *type_data; /* pool-type private data (Fiber: zend_fiber + event) */
 };
 
 /* The only php_request_startup() in the process lifetime + capture of the base
