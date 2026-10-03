@@ -66,6 +66,13 @@ has_symbol() { nm --defined-only "$BIN" 2>/dev/null | grep -qw -- "$1"; }
 HAS_TLS=0; has_symbol fpm_tls_http_validate && HAS_TLS=1
 HAS_ACME=0; has_symbol fpm_acme_challenge_init_main && HAS_ACME=1
 
+# The test-suite clock (issue #396): an environment variable can make it run
+# faster than real time, so it must never ship. build/libphp-build.sh builds it
+# only with FPMNG_DEBUG_CLOCK=1, and that is a CI switch; this is the gate
+# that keeps such a binary from being packaged anyway.
+has_symbol fpm_debug_clock_now &&
+  fail "this binary was built with FPMNG_DEBUG_CLOCK=1 (it has fpm_debug_clock_now), which is for the test suite only and is never packaged (issue #396)"
+
 # Only two combinations have a name. A binary with TLS but no ACME is a
 # perfectly good thing to build by hand and not a thing this repository
 # publishes, so it is refused here rather than shipped under one of the two
@@ -242,6 +249,11 @@ EOT
 chmod 0755 "$ROOT/DEBIAN/postinst" "$ROOT/DEBIAN/prerm" "$ROOT/DEBIAN/postrm"
 
 cp "$REPO/README.md" "$ROOT/usr/share/doc/$PKGNAME/README.md"
+# MIT, PHP License 3.01 and BSD-2-Clause notices (issue #581). Written to a
+# temporary file first so a missing source text fails here, not as an empty file.
+"$REPO/build/package-licenses.sh" > "$OUT/copyright.tmp" || fail "could not assemble the license texts"
+install -m 0644 "$OUT/copyright.tmp" "$ROOT/usr/share/doc/$PKGNAME/copyright"
+rm -f "$OUT/copyright.tmp"
 
 DEB=$OUT/${PKGNAME}_${VERSION}_${ARCH}.deb
 dpkg-deb --build --root-owner-group "$ROOT" "$DEB" >/dev/null

@@ -16,12 +16,14 @@ whole thing and one binary to scan.
 The HTTP gateway POC on libevent works, as a branch in php-src:
 https://github.com/s2x/php-src/tree/fpm-http-poc
 
-Verified 2026-09-07 against `sapi/fpmng`:
+Historical measurement (2026-09-07, php-src tree build; the static musl
+artefact it describes was retired from `main` in #424): a full static
+`-static-pie` build on musl ran in a bare `FROM scratch` as PID 1 and answered
+HTTP 200. Current builds are dynamic only (Debian/Ubuntu glibc and Alpine musl,
+PHP 8.5 NTS) against the distribution's PHP SDK; see `docs/install.md`.
 
-- full static build on musl (`-static-pie`) with opcache, mbstring, curl
-  + OpenSSL, zlib, pdo_mysql, sockets, pcntl, posix
-- runs in a bare `FROM scratch`, php-fpm-ng as PID 1, HTTP 200, whole image
-  33,885,546 bytes with the full, unstripped binary
+Current state of `sapi/fpmng`:
+
 - the frontend selects `pool.type = gateway | fastcgi | http-direct`; no
   directive means classic `fastcgi` and stays compatible with upstream FPM.
   `pool.executor` is available on `http-direct`: `classic` is the default, and
@@ -32,10 +34,8 @@ Verified 2026-09-07 against `sapi/fpmng`:
   opt into per-pool operator metrics on the shared HTTP listener while keeping
   upstream `pm.status_path` on the FastCGI socket (`docs/gateway.md` and
   `docs/operator-endpoint.md`).
-- on this branch (`async`, issue #373) `pool.type = fastcgi` also accepts
-  `pool.executor = fiber | async`, compiled in only with `--enable-fpmng-fiber`
-  / `--enable-fpmng-async`; behind a gateway such a pool is an ordinary
-  `http.route[]` target
+- the `fiber` and `async` executors moved to branch `async` (issue #373) and
+  are not available on `main`
 - metrics: `operator.status_path` (JSON) and `operator.metrics_path`
   (Prometheus) expose one pool on an operator listener named by
   `operator.status_listen` / `operator.metrics_listen`, one target per pool
@@ -44,10 +44,8 @@ Verified 2026-09-07 against `sapi/fpmng`:
   PHP
   (`fpm_metric_register/inc/set/observe`, NOTES 3k/3w) through the
   `ext/fpmng_metrics/` extension, also from CLI via `fpm_metric_render()`
-- the `fiber` executor is experimental and not intended for production, while
-  `async` is currently rejected during configuration validation until it has
-  the same hardening; limitations are described in `docs/async_errors.md` and
-  `docs/NOTES.md`, sections 3t-3u
+- the `fiber` and `async` executors live on branch `async` of this repository
+  (issue #373), not on `main`
 
 ## Support tiers
 
@@ -70,8 +68,7 @@ Where things stand today (audited against the bar below in issue #380):
 | `pool.type = http-direct` with `pool.executor = worker` | beta |
 | TLS termination (`--enable-fpmng-tls`, `http.tls_*`) | beta |
 | ACME certificate issuance (`--enable-fpmng-acme`) | beta |
-| `pool.executor = fiber` (`--enable-fpmng-fiber`) | experimental |
-| `pool.executor = async` (`--enable-fpmng-async`) | experimental |
+| `pool.executor = fiber` / `async` | moved to branch `async` (issue #373) |
 
 `pool.type = http`, `pool.type = fastcgi-ng` and `pool.type = status` are
 retired names, not tiers: `http` was split into `gateway` plus an ordinary
@@ -189,8 +186,8 @@ target pool rather than to a prefix:
 The HTTP gateway's TLS directives (`http.tls_cert`, `http.tls_reload_check`,
 ...), including how a renewed certificate reaches every gateway process
 without a restart, are documented in [`docs/tls.md`](docs/tls.md). TLS
-termination is a build flag -- `./configure --enable-fpmng-tls`, off by
-default and not in the packages (issue #280).
+termination is a build toggle -- `FPMNG_TLS=1 ./build/libphp-build.sh`, off by
+default and only in the `php-fpm-ng-tls` package (issue #280).
 
 The gateway answers the ACME HTTP-01 challenge itself, on both its own
 `listen` and the plain `http.plain_listen` companion, from state a `cron` or
@@ -198,9 +195,9 @@ The gateway answers the ACME HTTP-01 challenge itself, on both its own
 [`docs/acme-challenge.md`](docs/acme-challenge.md). Only one process may
 renew a given certificate, and the result reaches every gateway through the
 existing no-restart certificate reload —
-[`docs/acme-renewal.md`](docs/acme-renewal.md). ACME is a build flag of its
-own on top of the TLS one -- `./configure --enable-fpmng-tls
---enable-fpmng-acme`, off by default and not in the packages (issue #281);
+[`docs/acme-renewal.md`](docs/acme-renewal.md). ACME is a build toggle of its
+own on top of the TLS one -- `FPMNG_TLS=1 FPMNG_ACME=1`, off by default and only
+in the `php-fpm-ng-tls` package (issue #281);
 a build without it carries neither the challenge state nor the client, and
 refuses an ACME `cron.script` at startup.
 
@@ -272,33 +269,24 @@ request_cpu_tracking = no            ; if nobody reads "last request cpu" or %C
 
 ## Building
 
-First prepare a pinned php-src tree with this repository's `sapi/fpmng`, then
-run the static build in Alpine, building out-of-tree:
+`main` builds against the distribution's prebuilt PHP 8.5 SDK (NTS, Linux,
+dynamic). It needs no php-src tree and does not compile PHP:
 
 ```sh
-./build/prepare.sh /path/to/php-src
-rm -rf "$PWD/build-dir" "$PWD/out"
-mkdir "$PWD/build-dir" "$PWD/out"
+# Debian / Ubuntu 26.04
+apt-get install build-essential libevent-dev libacl1-dev \
+    php8.5-dev libphp8.5-embed php8.5-cli
+# Alpine: build-base libevent-dev acl-dev php85-dev php85-embed php85
 
-docker run --rm \
-  -v /path/to/php-src:/src \
-  -v "$PWD/build-dir:/build" \
-  -v "$PWD:/repo" \
-  -v "$PWD/out:/out" \
-  alpine:3.22 sh /repo/build/static-full.sh
-
-./build/test-static-full.sh "$PWD/out/php-fpm-ng-full"
+./build/libphp-build.sh out        # out/php-fpm-ng, out/commands.log
+FPMNG_TLS=1 FPMNG_ACME=1 ./build/libphp-build.sh out   # needs libssl-dev
 ```
 
-Two flags without which this looks broken for no reason:
-
-- `LDFLAGS=-static-pie` — plain `-static` does not work, because the Alpine
-  toolchain defaults to PIE and the linker silently produces a dynamic
-  binary, and the build still succeeds
-- `PKG_CONFIG="pkg-config --static"` — otherwise static curl fails the
-  configure test, because its dependencies are missing from the link line
-
-Alpine has no `oniguruma-static`, so mbstring is built with `--disable-mbregex`.
+The platform matrix, the packages and the known limitations of this build are
+in `docs/install.md`. The test suites run against this binary:
+`./build/run-fpmng-phpt.sh - out-results` (see `docs/fpmng-phpt.md`). macOS is a
+from-source development platform only (`build/prepare.sh` against a php-src
+tree).
 
 ## Contributing
 
@@ -308,13 +296,15 @@ what is open; labels carry type (`bug`, `enhancement`, `spike`, `refactor`,
 priority. Everything under `track:nice-to-have` applies only to
 `pool.executor = fiber`, which is behind a build flag that is off by default.
 
-Before touching anything, read [`workflow.md`](workflow.md): the English-only
+Before touching anything, read [`AGENTS.md`](AGENTS.md): the English-only
 rule, the architecture contract (new behaviour in new files under
 `sapi/fpmng/fpm/`, never `strcmp(type->name, ...)`), the evidence rule, the
-shared test box, and the step-by-step process from issue to merged PR. What a
+shared test box, and the build, lint and test commands. The step-by-step
+process from issue to merged PR is [`docs/workflow.md`](docs/workflow.md), and
+releases follow [`docs/release-workflow.md`](docs/release-workflow.md). What a
 comment in this codebase is for — and which comments must never be deleted
 without re-establishing the fact first — is
-[`workflow.md`](workflow.md#comments-what-earns-one).
+[`AGENTS.md`](AGENTS.md#comments-what-earns-one).
 
 Until 2026-09-08 work was tracked as one Markdown file per task under `tasks/`.
 That directory is gone; [`docs/task-archive.md`](docs/task-archive.md) maps
@@ -323,4 +313,20 @@ its issue or the git command that prints the original file.
 
 ## License
 
-PHP License 3.01 — code comes from PHP-FPM.
+MIT, Copyright (c) 2026 Crazy Goat Software, see [LICENSE](LICENSE), except for the code taken from
+or derived from php-src:
+
+- **PHP License 3.01**:
+  - `third_party/php-src/` (vendored subset)
+  - `patches/` and `build/phpt-fixture-patches/`
+  - `sapi/fpmng/config.m4` and `sapi/fpmng/Makefile.frag`
+  - `sapi/fpmng/fpm/fpm.c`, `fpm_children.c`, `fpm_conf.c`, `fpm_conf.h`, `fpm_process_ctl.c`,
+    `fpm_request.c`, `fpm_request.h`, `fpm_stdio.c` and `zlog.h` (modified copies of `sapi/fpm/` files)
+- **BSD-2-Clause**, Copyright (c) 2007-2009 Andrei Nigmatulin (original FPM code, text in
+  `third_party/php-src/sapi/fpm/LICENSE`): the `sapi/fpmng/fpm/` copies listed above.
+
+Those files carry no license header of their own, mostly only the original "(c) 2007,2008 Andrei
+Nigmatulin" line; this list is what states their license. The same list is in [LICENSE](LICENSE).
+
+The `.deb` and `.apk` packages ship all three texts in one file: `/usr/share/doc/<pkg>/copyright` on
+Debian and `/usr/share/licenses/<pkg>/LICENSE` on Alpine (assembled by `build/package-licenses.sh`).

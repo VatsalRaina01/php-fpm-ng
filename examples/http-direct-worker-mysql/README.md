@@ -23,26 +23,24 @@ inside a single PHP process.
 
 ## Running it
 
-You need Docker and an **already built** `php-fpm-ng`. Nothing else — no PHP on
-the host, no `composer install`: Composer runs inside the image, because our
-own binary is built with `--disable-all` and has no phar.
+You need Docker and an **already built** `php-fpm-ng`. Nothing else on the
+host: no PHP, no `composer install`. Composer runs inside the image.
 
-A static binary works everywhere; a dynamically linked one works too, as long
-as the runtime stage has its shared libraries. `build/static-full.sh` runs
-*inside* Alpine and installs its own build dependencies with `apk`, so it is
-invoked through Docker, never on the host — this is the same command the
-`static-musl` CI job runs:
+The image is `ubuntu:26.04` with the distribution's `libphp8.5-embed`, because
+`php-fpm-ng` links the distribution's libphp (#419) and Debian bookworm has no
+PHP 8.5. The binary must therefore be built on Ubuntu 26.04 as well: the image
+runs it against the very libphp it was linked with. `build/libphp-build.sh`
+needs no php-src, so a throwaway container is enough:
 
 ```sh
-git clone --depth 1 -b php-8.5.9 https://github.com/php/php-src php-src
-./build/prepare.sh "$PWD/php-src"
-mkdir -p build-static out-static
-docker run --rm \
-  -v "$PWD/php-src:/src" -v "$PWD/build-static:/build" \
-  -v "$PWD:/repo" -v "$PWD/out-static:/out" \
-  alpine:3.22 sh /repo/build/static-full.sh
+mkdir -p out-libphp
+docker run --rm -v "$PWD:/repo:ro" -v "$PWD/out-libphp:/out" ubuntu:26.04 sh -c '
+  apt-get update -qq &&
+  DEBIAN_FRONTEND=noninteractive apt-get install -y -qq build-essential binutils \
+    php8.5-dev libphp8.5-embed libevent-dev libacl1-dev &&
+  sh /repo/build/libphp-build.sh /out'
 
-cp out-static/php-fpm-ng-full examples/http-direct-worker-mysql/php-fpm-ng
+cp out-libphp/php-fpm-ng examples/http-direct-worker-mysql/php-fpm-ng
 
 cd examples/http-direct-worker-mysql
 docker compose up --build --wait
@@ -165,8 +163,10 @@ responses before being relied on.
 
 ### The build needs `ext-filter` and `ext-ctype`
 
-Found the hard way, and fixed in `build/static-full.sh` as part of this
-example. Under `--disable-all` neither is built, and neither absence is
+Historical: found the hard way while this example ran on the static musl build
+(retired in #424), which was configured with `--disable-all`. A distribution
+`libphp` ships both, but the finding still applies to any minimal PHP build.
+Under `--disable-all` neither is built, and neither absence is
 reported at startup — you get an exception from inside a library instead:
 
 - without `ext-filter`, `league/uri-interfaces` (a hard `ext-filter`

@@ -41,7 +41,7 @@ const FPMNG_ASYNC_DISABLED_BY_POLICY = 'pool.executor = async is disabled';
 const FPMNG_ASYNC_NOT_BUILT = '--enable-fpmng-async';
 
 
-function expectConfigFailure(string $label, string $cfg, array $needles): void
+function expectConfigFailure(string $label, string $cfg, array $needles, array $forbidden = []): void
 {
     $tester = new FPM\Tester($cfg, '<?php echo "ok";');
     $messages = $tester->testConfig(true);
@@ -53,6 +53,13 @@ function expectConfigFailure(string $label, string $cfg, array $needles): void
     foreach ($needles as $needle) {
         if (!str_contains($text, $needle)) {
             echo "FAIL: $label missing needle: $needle\n";
+            echo "got:\n$text\n";
+            exit(1);
+        }
+    }
+    foreach ($forbidden as $bad) {
+        if (str_contains($text, $bad)) {
+            echo "FAIL: $label contains forbidden text: $bad\n";
             echo "got:\n$text\n";
             exit(1);
         }
@@ -144,7 +151,7 @@ expectConfigFailure(
 
 /* issue #376: pool.type = fastcgi-ng was removed. It is a retired name, not an
  * unknown one -- a config file outlives the release that broke it, so the
- * message has to say what happened and where the transport went. It reads the
+ * message has to say what happened and what to use instead. It reads the
  * same on every build: issue #420 removed the libphp guard entirely. */
 expectConfigFailure(
     'retired-fastcgi-ng',
@@ -153,7 +160,8 @@ expectConfigFailure(
         "pool.type 'fastcgi-ng' no longer exists",
         'removed in 0.9.0 (issue #376)',
         'use pool.type = fastcgi, or pool.type = http-direct for a pool with no web server in front',
-    ]
+    ],
+    ['lives on']
 );
 
 /* pool.type = http-direct + pool.executor = worker (task 073). The worker
@@ -388,6 +396,31 @@ expectConfigFailure(
  * this case fail in any --enable-fpmng-async build. */
 expectAsyncRejected($base . "\npool.type = fastcgi\npool.executor = async");
 
+/* Issue #593: the gateway has no connection cap, and http.max_connections* are
+ * read only by http-direct, so a gateway config naming them must fail instead
+ * of leaving the public port believed to be limited. */
+expectConfigFailure(
+    'gateway-max-connections',
+    gatewayConfig("http.max_connections = 10\n"),
+    ["'http.max_connections' is not supported by pool.type = gateway"]
+);
+expectConfigFailure(
+    'gateway-max-connections-per-client',
+    gatewayConfig("http.max_connections_per_client = 2\n"),
+    ["'http.max_connections_per_client' is not supported by pool.type = gateway"]
+);
+/* ... and the gateway-only client limits are refused on http-direct. */
+expectConfigFailure(
+    'direct-keepalive-timeout',
+    $workerBase . "\nphp_admin_value[max_execution_time] = 0\nhttp.keepalive_timeout = 1000",
+    ["'http.keepalive_timeout' is not supported by pool.type = http-direct"]
+);
+expectConfigFailure(
+    'direct-write-timeout',
+    $workerBase . "\nphp_admin_value[max_execution_time] = 0\nhttp.write_timeout = 1000",
+    ["'http.write_timeout' is not supported by pool.type = http-direct"]
+);
+
 ?>
 Done
 --EXPECT--
@@ -423,6 +456,10 @@ gateway-chroot: rejected
 gateway-http-listen-redundant: rejected
 gateway-no-routes: rejected
 async-disabled: rejected
+gateway-max-connections: rejected
+gateway-max-connections-per-client: rejected
+direct-keepalive-timeout: rejected
+direct-write-timeout: rejected
 Done
 --CLEAN--
 <?php

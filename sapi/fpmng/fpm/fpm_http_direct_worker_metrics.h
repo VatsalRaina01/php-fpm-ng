@@ -1,6 +1,6 @@
 /* fpm-ng: pool.executor = worker's honest metrics (issue #333).
  *
- * The worker executor calls fpm_request_accepting(false) once for the whole
+ * The worker executor calls fpm_request_accepting_ex(false) once for the whole
  * life of the child (fpm_http_direct_worker.c), so it has no per-request
  * scoreboard stage to report -- exactly why fpm_http_direct_worker_rejects
  * refuses operator.status_path, ping.* and access.*. What it DOES know honestly,
@@ -70,6 +70,6 @@ void fpm_worker_metrics_publish(struct fpm_worker_metrics *m, unsigned long pend
  * .c) so fpm_pool_type.c can wire it into the fpm_http_direct_worker literal,
  * the same way fpm_http_direct_worker_child_main is. */
 int fpm_http_direct_worker_live_gauges(struct fpm_worker_pool_s *wp,
-	struct fpm_pool_live_gauge_s out[FPM_POOL_LIVE_GAUGES_MAX]);
+		struct fpm_pool_live_gauge_s out[FPM_POOL_LIVE_GAUGES_MAX]);
 
 #endif

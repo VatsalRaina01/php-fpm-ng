@@ -23,7 +23,7 @@ through the normal PHP shutdown path.
 
 | pool type | pool-level limit | global limit on `docker stop` | hard cap (pool type) |
 |---|---|---|---|
-| `fastcgi` (+ `fiber`/`async` executors), `http` | `request_terminate_timeout` (per request; default 0 = none) | `process_control_timeout` (master escalation after `SIGTERM` to the master) | `request_terminate_timeout` when set |
+| `fastcgi`, `http` | `request_terminate_timeout` (per request; default 0 = none) | `process_control_timeout` (master escalation after `SIGTERM` to the master) | `request_terminate_timeout` when set |
 | `http-direct` with `pool.executor = worker` | none for the booted worker script; `worker.request_timeout` only bounds individual unanswered requests | reload sends SIGQUIT as a cooperative stop request; after `process_control_timeout` the master sends SIGTERM, then SIGKILL 1s later if still alive. Master termination sends SIGTERM immediately, then SIGKILL after `process_control_timeout` | global `process_control_timeout`; no worker-specific grace |
 | `supervisor` | `supervisor.stop_timeout` (default 10s) — our watchdog after `supervisor.stop_signal` (default `SIGTERM`, issue #324) to the child | `process_control_timeout` must be **≥** `supervisor.stop_timeout` or the master kills the child first | `supervisor.stop_timeout` |
 | `cron` | `cron.timeout` (default 0 = no limit on a running script) — the master sends `cron.stop_signal` (default `SIGTERM`, issue #325) to the child first | same: `process_control_timeout` must be **≥** `cron.timeout` when `cron.timeout > 0`, or the master wins | `cron.timeout` when set |

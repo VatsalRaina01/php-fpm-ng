@@ -13,8 +13,11 @@
 # run-tests.php invoked directly on one .phpt SKIPs with "php-fpm binary not
 # found" until something builds the symlink harness below (issue #141).
 #
-# The prepared tree must contain sapi/fpmng/tests/ with tester.inc from
-# build/prepare.sh. Only files matching fpmng-*.phpt are executed — upstream's
+# The tree is "-" (the usual way: assembled from third_party/php-src/ by
+# build/phpt-tree.sh, no php-src checkout involved, issue #423), or a directory
+# with that layout -- a tree from build/prepare.sh qualifies, which is how the
+# two are compared. It must contain run-tests.php and sapi/fpmng/tests/ with
+# tester.inc. Only files matching fpmng-*.phpt are executed — upstream's
 # copied suite is intentionally excluded and is run by build/run-fpm-phpt.sh.
 #
 # The glob is not the definition of ownership, only its naming convention. Every
@@ -37,10 +40,15 @@ glob or a plain substring, matched against the test file name. Every filter
 must match at least one discovered test. With no filter the whole owned suite
 runs.
 
-Both executable paths are required. The prepared source tree must contain
-sapi/fpmng/tests/tester.inc from build/prepare.sh. TEST_FPM_EXTENSION_DIR and
+Both executable paths are required. The tree is "-" for the one assembled from
+third_party/php-src/ (build/phpt-tree.sh), or a directory with run-tests.php
+and sapi/fpmng/tests/tester.inc (build/prepare.sh makes one). TEST_FPM_EXTENSION_DIR and
 TEST_FPM_RUN_AS_ROOT are passed through when set. TEST_FPM_TIMEOUT defaults to
 120 seconds because fpmng-cron-schedule.phpt may wait for the next minute tick.
+
+The tests run in parallel (run-tests.php -j, issue #394). TEST_FPM_JOBS sets the
+worker count; the default is the number of CPUs, at most 8. TEST_FPM_JOBS=1 runs
+the suite serially.
 EOF
     exit 2
 }
@@ -75,7 +83,9 @@ CLI_VERSION=not-measured
 FPM_VERSION=not-measured
 MARKERS=not-measured
 SOURCE_COMMIT=unknown
+TESTER_FPM=not-measured
 HARNESS_DIR=
+TREE_DIR=
 
 resolve_path() {
     input=$1
@@ -107,9 +117,29 @@ cleanup() {
     if [ -n "$HARNESS_DIR" ]; then
         rm -rf "$HARNESS_DIR"
     fi
+    if [ -n "$TREE_DIR" ]; then
+        # run-tests.php leaves .diff/.out/.exp/.log next to each failed test;
+        # keep them, they are the only record of why it failed.
+        if [ -n "${RESULTS_DIR:-}" ] && [ -d "$TREE_DIR/sapi/fpmng/tests" ]; then
+            mkdir -p "$RESULTS_DIR/failed-artifacts"
+            find "$TREE_DIR/sapi/fpmng/tests" -maxdepth 1 \( -name '*.diff' -o -name '*.out' -o -name '*.exp' -o -name '*.log' \) \
+                -exec cp {} "$RESULTS_DIR/failed-artifacts/" \; 2>/dev/null || true
+        fi
+        rm -rf "$TREE_DIR"
+    fi
     exit "$status"
 }
 trap cleanup EXIT
+
+# "-" for the tree: assemble it from third_party/php-src/ (issue #423), no
+# php-src checkout involved. Lives below the results directory like .harness
+# does, and goes away with it: the tests write into their own directory.
+if [ "$PHPSRC_INPUT" = - ]; then
+    mkdir -p "$RESULTS_INPUT" || fail "cannot create results directory: $RESULTS_INPUT"
+    TREE_DIR=$(resolve_path "$RESULTS_INPUT")/.tree
+    "$REPO/build/phpt-tree.sh" "$TREE_DIR" >&2 || fail "cannot assemble the test tree from third_party/php-src"
+    PHPSRC_INPUT=$TREE_DIR
+fi
 
 [ -d "$PHPSRC_INPUT" ] || fail "PHP source directory does not exist: $PHPSRC_INPUT"
 [ -f "$PHPSRC_INPUT/run-tests.php" ] || fail "run-tests.php not found below: $PHPSRC_INPUT"
@@ -117,8 +147,14 @@ trap cleanup EXIT
 [ -f "$PHPSRC_INPUT/$TEST_DIR/tester.inc" ] || fail "tester.inc not found below: $PHPSRC_INPUT/$TEST_DIR"
 
 PHPSRC=$(resolve_path "$PHPSRC_INPUT") || fail "cannot resolve PHP source directory: $PHPSRC_INPUT"
+
+# Issue #394: make the tree safe for run-tests.php -j (per-worker port blocks in
+# tester.inc, no directory-wide CONFLICTS). Before anything reads tester.inc.
+"$REPO/build/phpt-parallel.sh" "$PHPSRC" >&2 || fail "cannot prepare the test tree for parallel runs"
 mkdir -p "$RESULTS_INPUT" || fail "cannot create results directory: $RESULTS_INPUT"
 RESULTS_DIR=$(resolve_path "$RESULTS_INPUT") || fail "cannot resolve results directory: $RESULTS_INPUT"
+
+FIXTURES=$(cat "$PHPSRC/FIXTURES" 2>/dev/null || printf '%s' 'none (a tree prepared from a php-src checkout)')
 
 DISCOVERED=$RESULTS_DIR/discovered.tsv
 SELECTED=$RESULTS_DIR/selected.tsv
@@ -261,6 +297,9 @@ write_metadata() {
         printf '%s\n' "php_src=$PHPSRC"
         printf '%s\n' "php_src_commit=$SOURCE_COMMIT"
         printf '%s\n' "test_directory=$TEST_DIR"
+        printf '%s\n' 'fixtures_begin'
+        printf '%s\n' "$FIXTURES"
+        printf '%s\n' 'fixtures_end'
         printf '%s\n' "discovered_tests=$TEST_COUNT"
         printf '%s\n' "owned_tests=$OWNED_COUNT"
         printf '%s\n' "excluded_tests=$EXCLUDED_COUNT"
@@ -283,10 +322,12 @@ write_metadata() {
         printf '%s\n' 'php_fpm_ng_strings_end'
         printf '%s\n' "TEST_PHP_EXECUTABLE=$CLI_BIN"
         printf '%s\n' "TEST_PHP_FPM_EXECUTABLE=${HARNESS_FPM-unset}"
+        printf '%s\n' "tester_resolves_fpm_to=${TESTER_FPM-not-measured}"
         printf '%s\n' "TEST_FPM_EXTENSION_DIR=${TEST_FPM_EXTENSION_DIR-unset}"
         printf '%s\n' "TEST_FPM_RUN_AS_ROOT=${TEST_FPM_RUN_AS_ROOT-unset}"
         printf '%s\n' "TEST_FPM_TIMEOUT=${TEST_FPM_TIMEOUT-120}"
         printf '%s\n' "TEST_FPM_MIN_PASS=${TEST_FPM_MIN_PASS-unset}"
+        printf '%s\n' "TEST_FPM_JOBS=${TEST_FPM_JOBS-unset}"
     } > "$METADATA"
 }
 
@@ -298,8 +339,9 @@ write_counts() {
             printf "FAIL/ERROR=%d\n", count["FAIL/ERROR"] + 0
             printf "SKIP=%d\n", count["SKIP"] + 0
             printf "WARN=%d\n", count["WARN"] + 0
+            printf "XFAIL=%d\n", count["XFAIL"] + 0
             printf "NOT MEASURED=%d\n", count["NOT MEASURED"] + 0
-            printf "TOTAL=%d\n", (count["PASS"] + count["FAIL/ERROR"] + count["SKIP"] + count["WARN"] + count["NOT MEASURED"]) + 0
+            printf "TOTAL=%d\n", (count["PASS"] + count["FAIL/ERROR"] + count["SKIP"] + count["WARN"] + count["XFAIL"] + count["NOT MEASURED"]) + 0
         }
     ' "$RESULTS"
 }
@@ -376,6 +418,18 @@ ln -s "$FPM_BIN" "$HARNESS_DIR/fpm/php-fpm"
 # under $HARNESS_DIR, not at the caller-supplied $CLI_BIN path.
 HARNESS_CLI=$HARNESS_DIR/bin/php
 ln -s "$CLI_BIN" "$HARNESS_CLI"
+
+# Ask the harness itself which binary it is going to start, instead of trusting
+# the links above to have been enough. findExecutable() falls back to
+# <php>/sbin/php-fpm and to a php-fpm next to the tests, so a harness that did
+# not take the link would quietly exercise some other FPM -- an installed
+# php-fpm8.5 above all -- and report its results as this binary's.
+if ! TESTER_FPM=$(TEST_PHP_EXECUTABLE="$HARNESS_CLI" FPMNG_TESTER_INC="$PHPSRC/$TEST_DIR/tester.inc" \
+    "$CLI_BIN" -n -r 'require getenv("FPMNG_TESTER_INC"); $p = FPM\Tester::findExecutable(); echo $p === false ? "" : realpath($p);' 2>/dev/null); then
+    TESTER_FPM=unknown
+    preflight_fail "cannot ask tester.inc which FPM binary it will start (php -r failed with $CLI_BIN)"
+fi
+[ "$TESTER_FPM" = "$FPM_BIN" ] || preflight_fail "tester.inc would start '${TESTER_FPM:-nothing}', not the requested $FPM_BIN"
 write_metadata
 
 TIMEOUT=${TEST_FPM_TIMEOUT-120}
@@ -384,16 +438,32 @@ case "$TIMEOUT" in
     0) preflight_fail 'TEST_FPM_TIMEOUT must be greater than zero' ;;
 esac
 
-# Per-test durations (--show-slow, run-tests.php:116). The suite is serial (no
-# -j: upstream's Tester::getPort() bases every instance at the same port, see
-# issue #394), so its wall clock is the sum of its tests and a handful of them
-# dominate it -- without this the log says only how long all 124 took together.
+# Per-test durations (--show-slow, run-tests.php:116). Each test is timed on its
+# own, so with -j the table still ranks tests by what they cost, but their sum is
+# no longer the suite's wall clock: a handful of tests still bound it.
 # 1000 ms rather than 0: at 0 every test is "slow" and the table stops ranking
 # anything. Set TEST_FPM_SHOW_SLOW_MS=0 to turn the table off entirely.
 SHOW_SLOW_MS=${TEST_FPM_SHOW_SLOW_MS-1000}
 case "$SHOW_SLOW_MS" in
     ''|*[!0-9]*) preflight_fail "TEST_FPM_SHOW_SLOW_MS must be a non-negative integer: $SHOW_SLOW_MS" ;;
 esac
+
+# Parallel workers (issue #394). Most of the 177 tests start a master and then
+# wait on it, so they cost wall clock, not CPU, and more workers than CPUs still
+# pay; the cap keeps a large box from loading itself into the timing tests'
+# bounds. tester.inc gives each worker its own block of ports
+# (build/phpt-fixture-patches/). 1 means serial, with no -j at all, so
+# TEST_PHP_WORKER stays unset and the ports are the upstream ones.
+JOBS=${TEST_FPM_JOBS-}
+if [ -z "$JOBS" ]; then
+    JOBS=$(nproc 2>/dev/null || getconf _NPROCESSORS_ONLN 2>/dev/null || echo 1)
+    [ "$JOBS" -le 8 ] 2>/dev/null || JOBS=8
+fi
+case "$JOBS" in
+    ''|*[!0-9]*|0) preflight_fail "TEST_FPM_JOBS must be a positive integer: $JOBS" ;;
+esac
+JOBS_ARGS=
+[ "$JOBS" -gt 1 ] && JOBS_ARGS="-j$JOBS"
 
 # The floor on PASS, and why this runner needs one at all.
 #
@@ -451,7 +521,7 @@ printf '%s\n' "Binary: $FPM_BIN" >&2
 TEST_FILES=$(tr '\n' ' ' < "$SELECTED")
 
 set +e
-# $SHOW_SLOW_ARGS and $TEST_FILES are both meant to word-split into separate
+# $SHOW_SLOW_ARGS, $JOBS_ARGS and $TEST_FILES are all meant to word-split into separate
 # argv entries, which is what SC2086 would otherwise stop. (The reason is on
 # its own line: shellcheck does not parse a "disable=CODE -- reason" directive,
 # which is where this repository's six existing SC1072/SC1073 errors come from.)
@@ -471,6 +541,7 @@ set +e
         -w "$FAILED" \
         -s "$OUTPUT_LOG" \
         $SHOW_SLOW_ARGS \
+        $JOBS_ARGS \
         $TEST_FILES
 ) > "$RUN_LOG" 2>&1
 RUN_STATUS=$?
@@ -490,6 +561,15 @@ set -e
             }
             return path
         }
+        function has_xfail(rel,    path, line, found) {
+            path = source_root "/" rel
+            found = 0
+            while ((getline line < path) > 0) {
+                if (line == "--XFAIL--") { found = 1; break }
+            }
+            close(path)
+            return found
+        }
         FILENAME == status_file {
             if (NF >= 2) {
                 status[normalize($2)] = $1
@@ -503,8 +583,22 @@ set -e
                 category = "PASS"
             } else if (raw == "SKIPPED") {
                 category = "SKIP"
+            } else if (raw == "WARNED" && has_xfail($0)) {
+                # run-tests.php reports an --XFAIL-- test that PASSES as WARNED,
+                # exactly like a test that passed on retry, and exits 0. That is
+                # the defect being fixed with the section left behind, so it is
+                # a failure here: delete the section.
+                raw = "XPASS"
+                category = "FAIL/ERROR"
             } else if (raw == "WARNED") {
                 category = "WARN"
+            } else if (raw == "XFAILED") {
+                # A known defect, reproduced by a test that carries an --XFAIL--
+                # section naming its issue (#384 -> #537). Its own bucket: not a
+                # pass (it does not count toward the floor below), not a failure
+                # (it must not fail the job). If the defect is fixed the test
+                # passes and is reported as XPASS below, which does fail it.
+                category = "XFAIL"
             } else if (raw == "") {
                 raw = "NOT_MEASURED"
                 category = "NOT MEASURED"
@@ -614,6 +708,12 @@ fi
 # durations are exactly what someone debugging this failure needs to see.
 if [ -n "$LOW_PASS" ]; then
     printf '%s\n' "run-fpmng-phpt.sh: $LOW_PASS" >&2
+    [ "$RUN_STATUS" -ne 0 ] || RUN_STATUS=1
+fi
+XPASS_NAMES=$(awk -F '\t' 'NR > 1 && $3 == "XPASS" {print $1}' "$RESULTS")
+if [ -n "$XPASS_NAMES" ]; then
+    printf '%s\n' "run-fpmng-phpt.sh: expected-failure test(s) passed; the defect is fixed, delete the --XFAIL-- section:" >&2
+    printf '  %s\n' $XPASS_NAMES >&2
     [ "$RUN_STATUS" -ne 0 ] || RUN_STATUS=1
 fi
 

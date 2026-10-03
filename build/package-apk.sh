@@ -54,6 +54,13 @@ has_symbol() { nm --defined-only "$BIN" 2>/dev/null | grep -qw -- "$1"; }
 HAS_TLS=0; has_symbol fpm_tls_http_validate && HAS_TLS=1
 HAS_ACME=0; has_symbol fpm_acme_challenge_init_main && HAS_ACME=1
 
+# The test-suite clock (issue #396): an environment variable can make it run
+# faster than real time, so it must never ship. build/libphp-build.sh builds it
+# only with FPMNG_DEBUG_CLOCK=1, and that is a CI switch; this is the gate
+# that keeps such a binary from being packaged anyway.
+has_symbol fpm_debug_clock_now &&
+  fail "this binary was built with FPMNG_DEBUG_CLOCK=1 (it has fpm_debug_clock_now), which is for the test suite only and is never packaged (issue #396)"
+
 case "$HAS_TLS$HAS_ACME" in
 00) PKGNAME=php-fpm-ng
     PKGDESC="FPM process manager with HTTP-direct pools, on the distribution PHP; no TLS, no ACME" ;;
@@ -76,6 +83,8 @@ mkdir -p "$WORK/src"
 cp "$BIN" "$WORK/src/php-fpm-ng"
 cp "$REPO/packaging/apk/php-fpm-ng.conf" "$REPO/packaging/apk/www.conf" \
    "$REPO/packaging/apk/php-fpm-ng.initd" "$WORK/src/"
+# The license texts the license= field below names (issue #581).
+"$REPO/build/package-licenses.sh" > "$WORK/src/LICENSE" || fail "could not assemble the license texts"
 
 # The two packages own the same files, so each one replaces the other and both
 # provide the virtual php-fpm-ng-any (issue #294). replaces= is what lets apk
@@ -93,7 +102,7 @@ pkgrel=1
 pkgdesc="$PKGDESC ($RELEASE)"
 url="https://github.com/crazy-goat/php-fpm-ng"
 arch="$(abuild -A 2>/dev/null || echo x86_64)"
-license="PHP-3.01"
+license="MIT AND PHP-3.01 AND BSD-2-Clause"
 depends="$PHP_PKG-embed"
 provides="php-fpm-ng-any"
 replaces="$OTHER"
@@ -106,6 +115,7 @@ package() {
 	install -Dm0644 "\$srcdir"/php-fpm-ng.conf "\$pkgdir"/etc/php-fpm-ng/php-fpm-ng.conf
 	install -Dm0644 "\$srcdir"/www.conf "\$pkgdir"/etc/php-fpm-ng/conf.d/www.conf
 	install -Dm0755 "\$srcdir"/php-fpm-ng.initd "\$pkgdir"/etc/init.d/php-fpm-ng
+	install -Dm0644 "\$srcdir"/LICENSE "\$pkgdir"/usr/share/licenses/$PKGNAME/LICENSE
 	install -dm0750 "\$pkgdir"/var/log/php-fpm-ng
 }
 EOT

@@ -1723,7 +1723,7 @@ ZEND_END_ARG_INFO()
 /* SSL_get1_peer_certificate() (OpenSSL 3.0+; the older SSL_get_peer_certificate
  * name is a macro alias for it as of 3.0, so this compiles against either
  * header, but the non-deprecated spelling is used here since the build
- * targets 3.x, see build/ci-build-tree.sh). Formats one X509_NAME the same
+ * targets 3.x). Formats one X509_NAME the same
  * way `openssl x509 -noout -subject` does (XN_FLAG_ONELINE minus the
  * pointless leading space RFC2253 would add), so a test cross-checking this
  * output against `openssl s_client` output has something directly
@@ -2300,7 +2300,7 @@ static void fpm_direct_handle(struct evhttp_request *http, void *arg)
 
 	w->in_request = 1;
 	fpm_direct_current = &r;
-	fpm_request_reading_headers(false);
+	fpm_request_reading_headers_ex(false);
 	memset(&SG(request_info), 0, sizeof(SG(request_info)));
 	SG(server_context) = &r;
 	SG(request_info).path_translated = estrdup(w->script);
@@ -2376,7 +2376,7 @@ static void fpm_direct_handle(struct evhttp_request *http, void *arg)
 		w->in_request = 0;
 		fpm_direct_tick_now(w);
 		fpm_http_direct_ops_active(w->ops, -1);
-		fpm_request_accepting(true);
+		fpm_request_accepting_ex(true);
 		return;
 	}
 	if (r.streaming) {
@@ -2391,7 +2391,7 @@ static void fpm_direct_handle(struct evhttp_request *http, void *arg)
 		w->in_request = 0;
 		fpm_direct_tick_now(w);
 		fpm_http_direct_ops_active(w->ops, -1);
-		fpm_request_accepting(true);
+		fpm_request_accepting_ex(true);
 		return;
 	}
 	/* Cleared here rather than inside the helper: fpmng_respond() reaches the
@@ -2403,7 +2403,7 @@ static void fpm_direct_handle(struct evhttp_request *http, void *arg)
 	evhttp_clear_headers(&r.env);
 	evbuffer_free(r.output);
 	fpm_http_direct_ops_active(w->ops, -1);
-	fpm_request_accepting(true);
+	fpm_request_accepting_ex(true);
 }
 
 void fpm_http_direct_child_main(struct fpm_worker_pool_s *wp)
@@ -2545,7 +2545,7 @@ void fpm_http_direct_child_main(struct fpm_worker_pool_s *wp)
 	 * surgery lives, and before the loop: registered once per child, so the
 	 * name exists for every request this worker serves. */
 	fpm_direct_register_functions(wp->config->name);
-	fpm_request_accepting(false);
+	fpm_request_accepting_ex(false);
 	tick = event_new(w.base, -1, EV_PERSIST, fpm_direct_tick, &w);
 	if (!tick || event_add(tick, &interval) < 0) exit(FPM_EXIT_SOFTWARE);
 	event_base_dispatch(w.base);

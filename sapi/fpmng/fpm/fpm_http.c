@@ -45,6 +45,7 @@
 #include <stdlib.h>
 #include <stdint.h>
 #include <string.h>
+#include <ctype.h>
 #include <stdio.h>
 #include <errno.h>
 #include <signal.h>
@@ -172,6 +173,8 @@ struct {								\
 
 #define FPM_HTTP_GATEWAYS_DEFAULT 2			/* http.gateways default; also the FPM_HTTP_GATEWAYS env fallback */
 #define FPM_HTTP_IDLE_MS         500		/* http.idle_timeout default (ms); release a pinned worker after this much idle time */
+#define FPM_HTTP_KEEPALIVE_TIMEOUT_MS 60000	/* http.keepalive_timeout default (ms); how long an idle keep-alive client connection may wait for its next request */
+#define FPM_HTTP_WRITE_TIMEOUT_MS 30000		/* http.write_timeout default (ms); how long a client may make no progress on a pending response write */
 #define FPM_HTTP_READ_TIMEOUT_MS 5000		/* http.read_timeout default (ms); one budget for reading the whole request (headers + body) */
 /* A crash loop (bad bind, OOM, ...) must not turn into an unbounded fork()
  * storm: after this many respawns within RESPAWN_WINDOW seconds, a gateway
@@ -493,6 +496,7 @@ static void fpm_http_local_addr(struct evhttp_connection *evcon, char *addr_buf,
 
 const char *fpm_http_method_name(enum evhttp_cmd_type type);
 static void fpm_http_front_controller_validate(struct fpm_http_gateway_s *gw);
+static size_t fpm_http_raw_path(struct evhttp_request *req, char *path, size_t path_size);
 
 /* access.suppress_path[]: matched the same way ping.path is (see
  * fpm_http_serve_ping()) -- whole path, query string cut off, no
@@ -503,21 +507,12 @@ static void fpm_http_front_controller_validate(struct fpm_http_gateway_s *gw);
  * here before. */
 static int fpm_http_log_suppressed(struct fpm_http_gateway_s *gw, struct evhttp_request *req)
 {
-	const char *uri = evhttp_request_get_uri(req);
-	const char *query = uri ? strchr(uri, '?') : NULL;
-	size_t path_len;
 	char path[512];
 	unsigned i;
 
-	if (!gw->suppress_paths_count || !uri) {
+	if (!gw->suppress_paths_count || !fpm_http_raw_path(req, path, sizeof(path))) {
 		return 0;
 	}
-	path_len = query ? (size_t) (query - uri) : strlen(uri);
-	if (path_len >= sizeof(path)) {
-		return 0;
-	}
-	memcpy(path, uri, path_len);
-	path[path_len] = '\0';
 	for (i = 0; i < gw->suppress_paths_count; i++) {
 		if (!strcmp(path, gw->suppress_paths[i])) {
 			return 1;
@@ -619,6 +614,153 @@ static void fpm_http_param(fpm_http_conn *c, const char *name, const char *value
 
 /* ---------------------------------------------------------------- request -> FastCGI */
 
+/* Skips an absolute-form scheme://authority and reports the authority (without
+ * userinfo); a target without one is returned unchanged. Copies nothing. */
+static void fpm_http_origin_start(const char *uri, const char **authority, size_t *authority_len)
+{
+	const char *p = uri;
+
+	if (authority) {
+		*authority = NULL;
+		*authority_len = 0;
+	}
+	if (((*p | 0x20) >= 'a' && (*p | 0x20) <= 'z')) {
+		p++;
+		while (((*p | 0x20) >= 'a' && (*p | 0x20) <= 'z') || (*p >= '0' && *p <= '9')
+			|| *p == '+' || *p == '-' || *p == '.') {
+			p++;
+		}
+		if (p[0] == ':' && p[1] == '/' && p[2] == '/') {
+			const char *auth = p + 3;
+
+			p = auth;
+			while (*p && *p != '/' && *p != '?' && *p != '#') {
+				p++;
+			}
+			if (authority) {
+				const char *at;
+
+				/* userinfo is not part of a Host value (RFC 9110 7.2) */
+				for (at = p; at > auth && at[-1] != '@'; at--) {
+				}
+				*authority = at;
+				*authority_len = (size_t) (p - at);
+			}
+			return;
+		}
+	}
+}
+
+/* 1 = copied, 0 = no authority, -1 = authority longer than buf_len-1. */
+int fpm_http_absolute_authority(const char *uri, char *buf, size_t buf_len)
+{
+	const char *authority;
+	size_t len;
+
+	if (!uri) {
+		return 0;
+	}
+	fpm_http_origin_start(uri, &authority, &len);
+	if (!authority || !len) {
+		return 0;
+	}
+	if (len >= buf_len) {
+		return -1;	/* over-long: the caller answers 400 rather than fall back to Host */
+	}
+	memcpy(buf, authority, len);
+	buf[len] = '\0';
+	return 1;
+}
+
+/* Ingress step (#534), first thing in both listeners' request callbacks: a
+ * target that starts with "/" is an origin-form absolute-path (RFC 9112 3.2.1),
+ * so "//api/users" is the path "//api/users". libevent reads it as a
+ * network-path reference (host "api", path "/users"); rewrite its parse so the
+ * host is dropped and the path is the raw one up to "?" or "#". Only a target
+ * with a scheme keeps libevent's reading of an authority. From here on every
+ * consumer -- matchers, router, static lookup, ACME, REQUEST_URI -- sees one
+ * path, so nothing is matched on one path and served on another. */
+static void fpm_http_normalize_target(struct evhttp_request *req)
+{
+	struct evhttp_uri *u = (struct evhttp_uri *) evhttp_request_get_evhttp_uri(req);
+	const char *uri = evhttp_request_get_uri(req);
+	size_t len;
+	char *path;
+
+	if (!u || !uri || uri[0] != '/' || uri[1] != '/') {
+		return;
+	}
+	len = strcspn(uri, "?#");
+	path = estrndup(uri, len);
+	if (evhttp_uri_set_path(u, path) == 0) {
+		evhttp_uri_set_host(u, NULL);
+		evhttp_uri_set_port(u, -1);
+		evhttp_uri_set_userinfo(u, NULL);
+	}
+	efree(path);
+}
+
+/* The path every consumer of the request-target uses (see
+ * fpm_http_normalize_target()). "http:/metrics/app" yields "/metrics/app"; an
+ * empty path is "/" only when an authority was present ("GET http://h",
+ * RFC 9112 3.2.2). */
+static const char *fpm_http_request_path(struct evhttp_request *req)
+{
+	const struct evhttp_uri *u = evhttp_request_get_evhttp_uri(req);
+	const char *p = u ? evhttp_uri_get_path(u) : NULL;
+
+	if (u && p && !*p && evhttp_uri_get_host(u)) {
+		return "/";
+	}
+	return p;
+}
+
+/* The path of the request as every gateway matcher (ping.path, the operator
+ * namespace, access.suppress_path[]) compares it: fpm_http_request_path(), raw
+ * (no percent-decoding), the query already cut off by libevent's parse. Returns
+ * the length, or 0 when there is no path or it does not fit `path_size`-1
+ * bytes (#534). */
+static size_t fpm_http_raw_path(struct evhttp_request *req, char *path, size_t path_size)
+{
+	const char *p = fpm_http_request_path(req);
+	size_t len;
+
+	if (!p) {
+		return 0;
+	}
+	len = strlen(p);
+	if (len == 0 || len >= path_size) {
+		return 0;
+	}
+	memcpy(path, p, len);
+	path[len] = '\0';
+	return len;
+}
+
+/* The origin-form target (path and "?query") the gateway forwards: REQUEST_URI
+ * on the FastCGI transport, the request line of an http.route[] target and
+ * the 308 Location of the plain listener. Built from the same libevent parse
+ * as fpm_http_request_path(), so the path a request is matched and routed on is
+ * the path the application sees, for every form ("http://h/x", "http:/x",
+ * "//h/x", "/x"); the fragment is dropped (#534, #462). "*" and a target
+ * libevent did not parse are copied verbatim. */
+void fpm_http_origin_form(smart_str *out, struct evhttp_request *req)
+{
+	const struct evhttp_uri *u = evhttp_request_get_evhttp_uri(req);
+	const char *path = fpm_http_request_path(req);
+	const char *query = u ? evhttp_uri_get_query(u) : NULL;
+
+	if (!path) {
+		smart_str_appends(out, evhttp_request_get_uri(req));
+		return;
+	}
+	smart_str_appends(out, path);
+	if (query) {
+		smart_str_appendc(out, '?');
+		smart_str_appends(out, query);
+	}
+}
+
 const char *fpm_http_method_name(enum evhttp_cmd_type type)
 {
 	switch (type) {
@@ -646,12 +788,14 @@ static int fpm_http_build_request(fpm_http_conn *c, int script_missing_hint)
 	struct evhttp_request *req = c->req;
 	const struct evhttp_uri *uri = evhttp_request_get_evhttp_uri(req);
 	const char *method = fpm_http_method_name(evhttp_request_get_command(req));
-	const char *path = uri ? evhttp_uri_get_path(uri) : NULL;
+	const char *path = fpm_http_request_path(req);
 	const char *query = uri ? evhttp_uri_get_query(uri) : NULL;
 	const char *host = evhttp_request_get_host(req);
 	struct evkeyval *header;
 	struct evbuffer *body = evhttp_request_get_input_buffer(req);
-	char *decoded, buf[64];
+	char *decoded, buf[64], authority[FPM_HTTP_AUTHORITY_MAX];
+	int have_authority;
+	int saw_host;
 	smart_str filename = {0};
 	const char *path_info;
 	int trailing_slash;
@@ -771,7 +915,14 @@ static int fpm_http_build_request(fpm_http_conn *c, int script_missing_hint)
 	fpm_http_param(c, "SERVER_PROTOCOL", buf);
 	fpm_http_param(c, "GATEWAY_INTERFACE", "CGI/1.1");
 	fpm_http_param(c, "SERVER_SOFTWARE", "PHP-FPM/" PHP_VERSION);
-	fpm_http_param(c, "REQUEST_URI", evhttp_request_get_uri(req));
+	{
+		smart_str request_uri = {0};
+
+		fpm_http_origin_form(&request_uri, req);
+		smart_str_0(&request_uri);
+		fpm_http_param(c, "REQUEST_URI", ZSTR_VAL(request_uri.s));
+		smart_str_free(&request_uri);
+	}
 	fpm_http_param(c, "QUERY_STRING", query ? query : "");
 	fpm_http_param(c, "DOCUMENT_ROOT", c->gw->docroot);
 	fpm_http_param(c, "SCRIPT_NAME", ZSTR_VAL(filename.s) + strlen(c->gw->docroot));
@@ -849,10 +1000,24 @@ static int fpm_http_build_request(fpm_http_conn *c, int script_missing_hint)
 	snprintf(buf, sizeof(buf), "%zu", body_len);
 	fpm_http_param(c, "CONTENT_LENGTH", buf);
 
+	/* An absolute-form target's authority replaces the Host header (RFC 9112
+	 * 3.2.2), so HTTP_HOST agrees with SERVER_NAME and with what the http
+	 * transport sends (#534). */
+	have_authority = fpm_http_absolute_authority(evhttp_request_get_uri(req), authority, sizeof(authority)) > 0;
+	saw_host = 0;
+
 	/* "Content-Type: x" -> CONTENT_TYPE, anything else -> HTTP_<UPPER_WITH_UNDERSCORES> */
 	TAILQ_FOREACH(header, evhttp_request_get_input_headers(req), next) {
 		smart_str name = {0};
 		const char *k = header->key;
+		const char *value = header->value;
+
+		if (strcasecmp(k, "Host") == 0) {
+			saw_host = 1;
+			if (have_authority) {
+				value = authority;
+			}
+		}
 
 		/* Content-Length is already above under its CGI name; "Proxy" has no
 		 * CGI meaning at all and HTTP_PROXY is read as an outbound proxy by
@@ -873,6 +1038,18 @@ static int fpm_http_build_request(fpm_http_conn *c, int script_missing_hint)
 		 * by name does not arrive because someone else's mitigation happens to
 		 * cover one of the ways to read it. Issue #115. */
 		if (strcasecmp(k, "Content-Length") == 0 || strcasecmp(k, "Proxy") == 0) {
+			continue;
+		}
+		/* A name with "_" would collide with its "-" spelling: the mapping below
+		 * turns "-" into "_", so "X_Real_IP" and "X-Real-IP" both become
+		 * HTTP_X_REAL_IP, and the last pair on the wire wins in $_SERVER
+		 * (fcgi_hash_set replaces an existing key). A client could then
+		 * override a header the reverse proxy in front set. nginx (default
+		 * underscores_in_headers off) and Apache 2.4 drop such headers when
+		 * they build the CGI environment; the gateway is the front server for
+		 * this hop, so it does the same. Same rule in
+		 * fpm_http_direct_build_env(). Issue #595. */
+		if (strchr(k, '_') != NULL) {
 			continue;
 		}
 		if (strcasecmp(k, "Content-Type") != 0) {
@@ -900,8 +1077,14 @@ static int fpm_http_build_request(fpm_http_conn *c, int script_missing_hint)
 			}
 		}
 		smart_str_0(&name);
-		fpm_http_param(c, ZSTR_VAL(name.s), header->value);
+		fpm_http_param(c, ZSTR_VAL(name.s), value);
 		smart_str_free(&name);
+	}
+
+	/* No Host header at all: the authority still defines the host (RFC 9112
+	 * 3.2.2), same as the Host line the http transport sends. */
+	if (have_authority && !saw_host) {
+		fpm_http_param(c, "HTTP_HOST", authority);
 	}
 
 	if (c->params_oversize) {
@@ -959,6 +1142,25 @@ static void fpm_http_conn_free(fpm_http_conn *c)
 	free(c);
 }
 
+/* Issue #594: a CGI "Status:" value is "NNN" or "NNN reason", exactly three
+ * digits, and only a final status (200..599, fpm_http_direct_status_final())
+ * may become the status line. atoi() turned "abc" into 0, "99999" into itself
+ * and overflowed on a longer number; a 1xx went out as the *final* answer, its
+ * body dropped by libevent, and the client waited for a response that never
+ * came (the shape of #451). *reason points into `value`, "" when absent. */
+static bool fpm_http_parse_cgi_status(const char *value, int *code, const char **reason)
+{
+	if (!isdigit((unsigned char)value[0]) || !isdigit((unsigned char)value[1]) || !isdigit((unsigned char)value[2])) {
+		return false;
+	}
+	if (value[3] != '\0' && value[3] != ' ') {
+		return false;
+	}
+	*code = (value[0] - '0') * 100 + (value[1] - '0') * 10 + (value[2] - '0');
+	*reason = value[3] == ' ' ? value + 4 : "";
+	return fpm_http_direct_status_final(*code);
+}
+
 /* The CGI header block is complete: "Status:" becomes the status line, the rest is copied. */
 void fpm_http_start_reply(fpm_http_conn *c, size_t head_len, size_t body_off)
 {
@@ -966,6 +1168,7 @@ void fpm_http_start_reply(fpm_http_conn *c, size_t head_len, size_t body_off)
 	const char *line = c->cgi_headers.s ? ZSTR_VAL(c->cgi_headers.s) : "", *end = line + head_len;
 	char *reason = NULL;
 	int code = HTTP_OK;
+	bool invalid_status = false;
 
 	while (line < end) {
 		const char *nl = memchr(line, '\n', end - line), *next = nl ? nl + 1 : end, *colon;
@@ -987,9 +1190,18 @@ void fpm_http_start_reply(fpm_http_conn *c, size_t head_len, size_t body_off)
 			key = strndup(line, klen);
 			value = strndup(v, vlen);
 			if (strcasecmp(key, "Status") == 0) {
-				code = atoi(value);
+				const char *parsed_reason;
+
 				free(reason);
-				reason = strdup(strchr(value, ' ') ? strchr(value, ' ') + 1 : "");
+				reason = NULL;
+				if (fpm_http_parse_cgi_status(value, &code, &parsed_reason)) {
+					reason = strdup(parsed_reason);
+					invalid_status = false;
+				} else {
+					zlog(ZLOG_WARNING, "[pool %s] http: upstream sent invalid Status '%.64s', answering 502",
+						c->gw->pool, value);
+					invalid_status = true;
+				}
 			} else {
 				evhttp_add_header(out, key, value);
 			}
@@ -997,6 +1209,30 @@ void fpm_http_start_reply(fpm_http_conn *c, size_t head_len, size_t body_off)
 			free(value);
 		}
 		line = next;
+	}
+
+	if (invalid_status) {
+		/* Nothing the upstream said can be trusted any more: drop its headers
+		 * and, via discard_upstream, the rest of its reply. The 502 is a
+		 * chunked reply that fpm_http_finish() ends like any other, so the
+		 * request stays alive until then (an evhttp_send_error() here would
+		 * complete it while the upstream is still talking). Mapping to 500
+		 * instead is a maintainer decision (issue #594). */
+		struct evbuffer *msg = evbuffer_new();
+
+		evhttp_clear_headers(out);
+		evhttp_add_header(out, "Content-Type", "text/plain");
+		evhttp_send_reply_start(c->req, FPM_HTTP_BAD_GATEWAY, "Bad Gateway");
+		evbuffer_add_printf(msg, "Bad Gateway\n");
+		c->bytes_out += evbuffer_get_length(msg);
+		evhttp_send_reply_chunk(c->req, msg);
+		evbuffer_free(msg);
+		free(reason);
+		c->headers_sent = 1;
+		c->discard_upstream = 1;
+		c->status = FPM_HTTP_BAD_GATEWAY;
+		smart_str_free(&c->cgi_headers);
+		return;
 	}
 
 	/* http.pool_full_policy = wait (issue #309): observable from outside the
@@ -1030,6 +1266,9 @@ void fpm_http_stdout(fpm_http_conn *c, const char *data, size_t len)
 	size_t scan_from, i;
 	const char *h;
 
+	if (c->discard_upstream) {
+		return; /* issue #594: the 502 is already on the wire */
+	}
 	if (c->headers_sent) {
 		struct evbuffer *chunk = evbuffer_new();
 
@@ -1057,6 +1296,33 @@ void fpm_http_stdout(fpm_http_conn *c, const char *data, size_t len)
 	}
 	if (ZSTR_LEN(c->cgi_headers.s) > FPM_HTTP_MAX_CGI_HEADERS) {
 		fpm_http_start_reply(c, 0, 0); /* no header block in sight, ship it as a body */
+	}
+}
+
+/* Issue #533: the upstream failed after the status line and headers went to
+ * the client. evhttp_send_reply_end() would put the terminating 0-chunk on the
+ * wire, and the client (or a cache between us and it) would store a truncated
+ * body as a complete one. The only truthful thing left to send is a message
+ * that does not end: access-log the request, then shutdown() the client socket
+ * -- the same shape as fpm_direct_stream_abort() in fpm_http_direct.c -- so
+ * libevent finds the connection dead on its next pass, frees the request there
+ * and runs fpm_http_client_closed() for the gauge and the index. The close
+ * callback stays registered on purpose; fpm_http_conn_free() has detached this
+ * request from it. A reply framed by Content-Length is cut short of its
+ * length, a chunked one of its terminator; an HTTP/1.0 client gets a
+ * close-delimited reply, which no close can mark as incomplete. */
+static void fpm_http_finish_truncated(fpm_http_conn *c)
+{
+	struct evhttp_connection *evcon = evhttp_request_get_connection(c->req);
+	struct bufferevent *bev = evcon ? evhttp_connection_get_bufferevent(evcon) : NULL;
+	evutil_socket_t fd = bev ? bufferevent_getfd(bev) : -1;
+
+	fpm_http_log_response(c->gw, c->req, c->remote_addr[0] ? c->remote_addr : c->peer_addr,
+		c->remote_user, c->status, c->bytes_out,
+		c->log_target ? c->log_target : c->target->pool);
+	fpm_http_conn_free(c);
+	if (fd >= 0) {
+		shutdown(fd, SHUT_RDWR);
 	}
 }
 
@@ -1189,7 +1455,19 @@ void fpm_http_upstream_fail(fpm_http_upstream *up, int clean_eof)
 	}
 	/* EOF is normal after pm.max_requests or a worker restart; a request in flight is lost though */
 	if (up->current) {
-		fpm_http_finish(up->current, clean_eof || mute);
+		fpm_http_conn *c = up->current;
+
+		if (c->headers_sent && !c->discard_upstream) {
+			/* A close-delimited HTTP reply ends by this very EOF, but its
+			 * transport completes it before it gets here, so reaching this
+			 * point with headers out is always a lost reply (issue #533). */
+			zlog(ZLOG_WARNING, "[pool %s] http: upstream '%s' failed after the response head was sent; "
+				"the client connection is closed without completing the reply",
+				gw->pool, upstream_address);
+			fpm_http_finish_truncated(c);
+		} else {
+			fpm_http_finish(c, clean_eof || mute);
+		}
 		up->current = NULL;
 	}
 	up->t->ops->drop(up);
@@ -1392,6 +1670,26 @@ void fpm_http_upstream_write(fpm_http_upstream *up, const char *data, size_t len
  * target pool. Reached only through fpm_http_target_fastcgi_ops below -- issue
  * #340 moved it behind that pointer so #344 can add an HTTP/1.1 one next to it
  * without a second dispatch path. */
+/* Which connect failures mean "this target cannot be reached" -- as opposed to
+ * a busy one (EAGAIN: the unix backlog is full) or this process running out of
+ * descriptors, both of which stay a pool-full condition exactly as before. */
+static int fpm_http_connect_errno_unreachable(int err)
+{
+	switch (err) {
+	case ENOENT:
+	case ECONNREFUSED:
+	case EACCES:
+	case EPERM:
+	case ENOTSOCK:
+	case EADDRNOTAVAIL:
+	case ENETUNREACH:
+	case EHOSTUNREACH:
+		return 1;
+	default:
+		return 0;
+	}
+}
+
 fpm_http_upstream *fpm_http_transport_connect(struct fpm_http_target_s *t)
 {
 	struct fpm_http_gateway_s *gw = t->gw;
@@ -1405,6 +1703,7 @@ fpm_http_upstream *fpm_http_transport_connect(struct fpm_http_target_s *t)
 	up->t = t;
 	up->fd = socket(t->upstream_addr.ss_family, SOCK_STREAM, 0);
 	if (up->fd < 0) {
+		t->connect_errno = fpm_http_connect_errno_unreachable(errno) ? errno : 0;
 		free(up);
 		fpm_http_budget_give_back(t);
 		return NULL;
@@ -1420,6 +1719,7 @@ fpm_http_upstream *fpm_http_transport_connect(struct fpm_http_target_s *t)
 
 	if (connect(up->fd, (struct sockaddr*)&t->upstream_addr, t->upstream_len) != 0) {
 		if (errno != EINPROGRESS) {
+			t->connect_errno = fpm_http_connect_errno_unreachable(errno) ? errno : 0;
 			event_free(up->ev_read);
 			event_free(up->ev_write);
 			close(up->fd);
@@ -1485,6 +1785,16 @@ static void fpm_http_reject_queued(fpm_http_conn *c)
 	fpm_http_conn_free(c);
 }
 
+/* Answers one queued request 502 because the connection to its target could
+ * not even be opened (issue #465); the real reason is the log line, naming the
+ * target's address. Same unlink-first contract as fpm_http_reject_queued(). */
+static void fpm_http_reject_unreachable(fpm_http_conn *c, int err)
+{
+	zlog(ZLOG_WARNING, "[pool %s] http: cannot connect to target '%s' (%s) target=%s",
+		c->gw->pool, c->target->listen_address, strerror(err), c->target->pool);
+	fpm_http_finish(c, 1);
+}
+
 /* http.pool_full_policy = wait (issue #309): this request has been queued for
  * http.pool_full_wait_ms. The bound is on the wait, not on the request -- a
  * request already handed to an upstream has left gw->waiting and had its
@@ -1548,7 +1858,28 @@ static void fpm_http_pump_target(struct fpm_http_target_s *t)
 			}
 		}
 		if (!idle) {
+			t->connect_errno = 0;
 			idle = t->ops->connect(t);
+		}
+		if (!idle && t->connect_errno
+			&& !(gw->wait_policy == FPM_HTTP_POOL_FULL_WAIT && t->nupstreams > 0)) {
+			/* Not a full pool: the connection itself failed (the target's
+			 * socket is gone, refused, not accessible). Waiting would never
+			 * help when nothing is in flight -- no upstream will be released
+			 * to pump the queue again -- so every queued request gets the
+			 * real reason in the log and a 502. With http.pool_full_policy =
+			 * wait and requests still in flight, the queue is left to that
+			 * policy: a release re-pumps it and the wait timers bound it. */
+			int err = t->connect_errno;
+
+			while (!TAILQ_EMPTY(&t->waiting)) {
+				fpm_http_conn *w = TAILQ_FIRST(&t->waiting);
+
+				TAILQ_REMOVE(&t->waiting, w, link);
+				w->queued = 0;
+				fpm_http_reject_unreachable(w, err);
+			}
+			return;
 		}
 		if (!idle) {
 			/* The pool is FULL for this gateway: every upstream connection it
@@ -1846,6 +2177,16 @@ static void fpm_http_client_closed(struct evhttp_connection *evcon, void *arg)
 	/* One close notification owns this node. Clearing the slot first also keeps
 	 * a nested libevent close path from seeing the same callback as current. */
 	evhttp_connection_set_closecb(evcon, NULL, NULL);
+	/* Issue #593: before the connection's fd goes, so the one-shot watcher is
+	 * never registered on a closed descriptor. */
+	if (cl->ka_timer) {
+		event_free(cl->ka_timer);
+		cl->ka_timer = NULL;
+	}
+	if (cl->ka_watch) {
+		event_free(cl->ka_watch);
+		cl->ka_watch = NULL;
+	}
 	if (c) {
 		c->evcon = NULL;
 		c->client = NULL;
@@ -1865,6 +2206,124 @@ static void fpm_http_client_closed(struct evhttp_connection *evcon, void *arg)
 		fpm_http_conn_free(c);
 	}
 	free(cl);
+}
+
+/* ---------------------------------------------------------------- client limits after the first request (issue #593) */
+
+/* The deadline for the next request expired, or the client stalled. Shrinks the
+ * connection's own timeouts to (almost) zero so evhttp closes it through its
+ * error path -- the same, and only safe, way fpm_http_read_deadline_fire()
+ * ends a connection (a bufferevent_free() underneath evhttp is a
+ * use-after-free, issue #90). `cl->evcon` is valid here: the close callback
+ * frees this timer before evhttp lets go of the connection. */
+static void fpm_http_client_idle_fire(evutil_socket_t fd, short what, void *arg)
+{
+	struct fpm_http_client_s *cl = arg;
+	static const struct timeval now = {0, 1};
+
+	(void) fd; (void) what;
+	if (cl->ka_watch) {
+		event_del(cl->ka_watch);
+	}
+	bufferevent_set_timeouts(evhttp_connection_get_bufferevent(cl->evcon), &now, &now);
+}
+
+/* The first byte of the next request arrived. From here the client is
+ * delivering a request, and that is http.read_timeout's job: the same
+ * absolute budget a first request gets, whatever the spacing of its bytes. The
+ * keep-alive timer is replaced, not stacked; it is created here when
+ * http.keepalive_timeout = 0 left it unarmed. With http.read_timeout = 0 the
+ * keep-alive timer simply keeps running, so the connection is still bounded.
+ * Limit: bytes of the next request that arrive together with the previous one
+ * are already in the bufferevent input, so this watcher never fires for them;
+ * such a connection is bounded by http.keepalive_timeout, not by
+ * http.read_timeout. */
+static void fpm_http_client_idle_byte(evutil_socket_t fd, short what, void *arg)
+{
+	struct fpm_http_client_s *cl = arg;
+
+	(void) fd; (void) what;
+	if (cl->gw->read_timeout_ms <= 0) {
+		return;
+	}
+	if (!cl->ka_timer) {
+		cl->ka_timer = event_new(cl->gw->base, -1, EV_TIMEOUT, fpm_http_client_idle_fire, cl);
+	}
+	if (cl->ka_timer) {
+		event_add(cl->ka_timer, &cl->gw->read_timeout);
+	}
+}
+
+/* The response is complete and the connection stays open for another request:
+ * start the keep-alive clock. If evhttp is about to close the connection
+ * instead (Connection: close, an error reply), the close callback frees both
+ * events a moment later -- nothing here holds a reference to the connection,
+ * which is the reason this lives on the client node and not on the
+ * struct fpm_http_read_deadline_s bufferevent reference. A reference held
+ * past a close would keep the fd, and a "Connection: close" client would wait
+ * for the whole keep-alive timeout to see EOF. */
+static void fpm_http_client_request_done(struct evhttp_request *req, void *arg)
+{
+	struct fpm_http_client_s *cl = arg;
+	struct fpm_http_gateway_s *gw = cl->gw;
+	evutil_socket_t fd;
+
+	(void) req;
+	if ((gw->keepalive_timeout_ms <= 0 && gw->read_timeout_ms <= 0) || !cl->evcon) {
+		return;
+	}
+	/* Keep-alive 0 means unlimited idle, but a later request is still bounded by
+	 * http.read_timeout: only the first-byte watcher is armed then. */
+	if (gw->keepalive_timeout_ms > 0) {
+		if (!cl->ka_timer) {
+			cl->ka_timer = event_new(gw->base, -1, EV_TIMEOUT, fpm_http_client_idle_fire, cl);
+		}
+		if (!cl->ka_timer) {
+			return;	/* OOM: this connection is not bounded, the gateway still works */
+		}
+		event_add(cl->ka_timer, &gw->keepalive_timeout);
+	}
+	if (gw->read_timeout_ms <= 0) {
+		return;
+	}
+	fd = bufferevent_getfd(evhttp_connection_get_bufferevent(cl->evcon));
+	if (fd < 0) {
+		return;
+	}
+	if (!cl->ka_watch) {
+		cl->ka_watch = event_new(gw->base, fd, EV_READ, fpm_http_client_idle_byte, cl);
+	}
+	if (cl->ka_watch) {
+		event_add(cl->ka_watch, NULL);
+	}
+}
+
+/* Called first thing for every request dispatched on a connection, from both
+ * listeners. A request reaching a gencb has been read completely, so the
+ * keep-alive clock (and the first-byte watcher) are spent; the completion hook
+ * restarts them when this request's response is done. Also puts the client
+ * write stall limit on the connection (http.write_timeout): a bufferevent write
+ * timeout runs only while output is pending and restarts on every byte the
+ * client takes, so it is a stall timer -- unlike a read timeout it does not
+ * cut a slow upstream, because nothing is pending to the client then. The read
+ * side is passed as NULL on purpose: evhttp's read timeout is an idle timer
+ * and would cut exactly that slow upstream (see the bevcb comment). */
+static void fpm_http_client_request_begin(struct fpm_http_gateway_s *gw,
+	struct fpm_http_client_s *cl, struct evhttp_request *req)
+{
+	if (!gw || !cl) {
+		return;
+	}
+	if (cl->ka_timer) {
+		event_del(cl->ka_timer);
+	}
+	if (cl->ka_watch) {
+		event_del(cl->ka_watch);
+	}
+	evhttp_request_set_on_complete_cb(req, fpm_http_client_request_done, cl);
+	if (gw->write_timeout_ms > 0 && cl->evcon) {
+		bufferevent_set_timeouts(evhttp_connection_get_bufferevent(cl->evcon), NULL, &gw->write_timeout);
+	}
 }
 
 /* ------------------------------------------------------------------------ *
@@ -2070,7 +2529,8 @@ static int fpm_http_serve_acme_challenge(struct fpm_http_gateway_s *gw, struct e
  * pm.max_requests or queue counter is ever touched by a locally answered
  * ping. It is not a request of the pool.
  *
- * Matched against the RAW request URI (evhttp_request_get_uri(), not the
+ * Matched against the origin-form path of the request-target
+ * (fpm_http_raw_path(): an absolute-form target is reduced to its path; not the
  * percent-decoded path fpm_http_static_decode_path() produces for ACME/static
  * below), with any query string cut off and the whole path compared so that
  * "/pings" is not "/ping" -- verbatim the matcher http-direct already uses,
@@ -2080,23 +2540,14 @@ static int fpm_http_serve_acme_challenge(struct fpm_http_gateway_s *gw, struct e
  * written against the documented spelling. */
 static int fpm_http_serve_ping(struct fpm_http_gateway_s *gw, struct evhttp_request *req, const char *remote_addr)
 {
-	const char *uri = evhttp_request_get_uri(req);
-	const char *query = uri ? strchr(uri, '?') : NULL;
-	size_t path_len;
 	char path[512];
 	struct evkeyvalq *out;
 	struct evbuffer *body;
 	size_t bytes;
 
-	if (!gw->ping_path || !uri) {
+	if (!gw->ping_path || !fpm_http_raw_path(req, path, sizeof(path))) {
 		return 0;
 	}
-	path_len = query ? (size_t) (query - uri) : strlen(uri);
-	if (path_len >= sizeof(path)) {
-		return 0;
-	}
-	memcpy(path, uri, path_len);
-	path[path_len] = '\0';
 	if (strcmp(path, gw->ping_path) != 0) {
 		return 0;
 	}
@@ -2202,8 +2653,11 @@ static void fpm_http_plain_request(struct evhttp_request *req, void *arg)
 	struct evkeyvalq *headers = evhttp_request_get_output_headers(req);
 	char *location;
 	char *redirect_host = NULL;
+	char authority[FPM_HTTP_AUTHORITY_MAX];
+	smart_str target = {0};
 	size_t len;
 
+	fpm_http_normalize_target(req);
 	/* Issue #390 review: this listener bypassed all of the gateway's own
 	 * accounting. Every plain request is answered locally -- the ACME
 	 * challenge, the 308 redirect, the NO_CERT 503, a 400 -- and it is the
@@ -2216,7 +2670,10 @@ static void fpm_http_plain_request(struct evhttp_request *req, void *arg)
 	if (gw && gw->counters) {
 		fpm_http_counter_incr(&gw->counters->requests_total);
 	}
-	(void) fpm_http_client_track(gw, evcon);
+	fpm_http_client_request_begin(gw, fpm_http_client_track(gw, evcon), req);
+	if (gw && gw->read_timeout_ms > 0) {
+		fpm_http_read_deadline_disarm(gw, evcon ? evhttp_connection_get_bufferevent(evcon) : NULL);
+	}
 	fpm_http_count_local(gw);
 
 	/* HTTP-01 before anything else, including the redirect: the CA speaks
@@ -2243,8 +2700,28 @@ static void fpm_http_plain_request(struct evhttp_request *req, void *arg)
 			return;
 		}
 	}
+	/* An absolute-form target names its own authority, which replaces Host
+	 * (RFC 9112 3.2.2), and is redirected as origin-form -- otherwise the
+	 * Location would be "https://h" + "http://h/x" (#534). */
+	if (uri) {
+		int have = fpm_http_absolute_authority(uri, authority, sizeof(authority));
+
+		if (have < 0) {
+			evhttp_send_error(req, HTTP_BADREQUEST, "Bad Request");
+			return;
+		}
+		if (have > 0) {
+			host = authority;
+		}
+	}
+	if (uri) {
+		fpm_http_origin_form(&target, req);
+		smart_str_0(&target);
+		uri = ZSTR_VAL(target.s);
+	}
 	if (!host || !*host || strchr(host, '\r') || strchr(host, '\n') || !uri) {
 		evhttp_send_error(req, HTTP_BADREQUEST, "Bad Request");
+		smart_str_free(&target);
 		return;
 	}
 	if (host[0] == '[') {
@@ -2252,6 +2729,7 @@ static void fpm_http_plain_request(struct evhttp_request *req, void *arg)
 
 		if (!end || (end[1] && end[1] != ':')) {
 			evhttp_send_error(req, HTTP_BADREQUEST, "Bad Request");
+			smart_str_free(&target);
 			return;
 		}
 		redirect_host = strndup(host, (size_t)(end - host + 1));
@@ -2263,6 +2741,7 @@ static void fpm_http_plain_request(struct evhttp_request *req, void *arg)
 	if (!redirect_host || !*redirect_host) {
 		free(redirect_host);
 		evhttp_send_error(req, HTTP_SERVUNAVAIL, "Service Unavailable");
+		smart_str_free(&target);
 		return;
 	}
 
@@ -2271,6 +2750,7 @@ static void fpm_http_plain_request(struct evhttp_request *req, void *arg)
 	if (!location) {
 		free(redirect_host);
 		evhttp_send_error(req, HTTP_SERVUNAVAIL, "Service Unavailable");
+		smart_str_free(&target);
 		return;
 	}
 	snprintf(location, len, "https://%s%s", redirect_host, uri);
@@ -2278,6 +2758,7 @@ static void fpm_http_plain_request(struct evhttp_request *req, void *arg)
 	evhttp_send_reply(req, 308, "Permanent Redirect", NULL);
 	free(location);
 	free(redirect_host);
+	smart_str_free(&target);
 }
 
 /* ------------------------------------------------------------------- routing */
@@ -2320,7 +2801,6 @@ static int fpm_http_prefix_covers(const char *prefix, size_t prefix_len, const c
  * gateway is alive, not any target's workers). */
 static struct fpm_http_target_s *fpm_http_route(struct fpm_http_gateway_s *gw, struct evhttp_request *req)
 {
-	const struct evhttp_uri *uri;
 	const char *path;
 	char *decoded;
 	size_t decoded_len;
@@ -2336,8 +2816,7 @@ static struct fpm_http_target_s *fpm_http_route(struct fpm_http_gateway_s *gw, s
 		return gw->routes[0].target;
 	}
 
-	uri = evhttp_request_get_evhttp_uri(req);
-	path = uri ? evhttp_uri_get_path(uri) : NULL;
+	path = fpm_http_request_path(req);
 	if (!path || !*path) {
 		/* No path to route on: the gateway has no implicit target, so this
 		 * is a local 404 (fpm_http_request() answers it). */
@@ -2537,13 +3016,16 @@ static int fpm_http_operator_request(struct fpm_http_gateway_s *gw, struct evhtt
 	if (!uri) {
 		return 0;
 	}
-	query = strchr(uri, '?');
-	path_len = query ? (size_t) (query - uri) : strlen(uri);
-	if (path_len >= sizeof(path)) {
-		return 0;	/* too long to be one of this gateway's bases; route it */
+	/* Same libevent parse as the path and as the forwarded target (#534). */
+	{
+		const struct evhttp_uri *pu = evhttp_request_get_evhttp_uri(req);
+
+		query = pu ? evhttp_uri_get_query(pu) : NULL;
 	}
-	memcpy(path, uri, path_len);
-	path[path_len] = '\0';
+	path_len = fpm_http_raw_path(req, path, sizeof(path));
+	if (!path_len) {
+		return 0;	/* empty, or too long to be one of this gateway's bases; route it */
+	}
 
 	if (!fpm_http_operator_under_base(gw, path)) {
 		return 0;
@@ -2595,11 +3077,11 @@ static int fpm_http_operator_request(struct fpm_http_gateway_s *gw, struct evhtt
 	 * asked for a variant. Everything else about the request (method, body --
 	 * monitored pages are GETs) is serialized by the #344 HTTP transport. */
 	local_len = strlen(hit->local_uri);
-	/* `query` is strchr(uri, '?') and therefore INCLUDES the leading '?', so
-	 * it is copied whole exactly once -- writing a separate '?' and then
-	 * copying query produced "/_m??json", and the operator listener's
-	 * fpm_operator_http_has_flag() then never matched the variant. */
-	query_len = query ? strlen(query) : 0;
+	/* `query` is evhttp_uri_get_query(): WITHOUT the leading '?'. The '?' is
+	 * written exactly once below -- writing it twice produced "/_m??json", and
+	 * the operator listener's fpm_operator_http_has_flag() then never matched
+	 * the variant. */
+	query_len = query ? strlen(query) + 1 : 0;
 	target_uri = malloc(local_len + query_len + 1);
 	if (!target_uri) {
 		fpm_http_log_response(gw, req, effective_addr, NULL, FPM_HTTP_SERVICE_UNAVAIL, 0, "operator");
@@ -2610,7 +3092,8 @@ static int fpm_http_operator_request(struct fpm_http_gateway_s *gw, struct evhtt
 	}
 	memcpy(target_uri, hit->local_uri, local_len);
 	if (query_len) {
-		memcpy(target_uri + local_len, query, query_len);
+		target_uri[local_len] = '?';
+		memcpy(target_uri + local_len + 1, query, query_len - 1);
 	}
 	target_uri[local_len + query_len] = '\0';
 	c->upstream_uri_owned = target_uri;
@@ -2636,6 +3119,7 @@ static void fpm_http_request(struct evhttp_request *req, void *arg)
 	struct fpm_http_client_s *client;
 	fpm_http_conn *c;
 
+	fpm_http_normalize_target(req);
 	if (evcon) {
 		evhttp_connection_get_peer(evcon, &peer_addr, &peer_port);
 	}
@@ -2650,10 +3134,12 @@ static void fpm_http_request(struct evhttp_request *req, void *arg)
 		fpm_http_counter_incr(&gw->counters->requests_total);
 	}
 	client = fpm_http_client_track(gw, evcon);
+	fpm_http_client_request_begin(gw, client, req);
 
 	/* Reaching this callback means the client delivered the whole request
 	 * (evhttp buffers headers AND body before dispatching), so its read
-	 * deadline (task 031, armed at accept) is spent. */
+	 * deadline (task 031, armed at accept) is spent. Later requests on the
+	 * connection are bounded by fpm_http_client_request_done() (issue #593). */
 	if (gw->read_timeout_ms > 0) {
 		fpm_http_read_deadline_disarm(gw, evcon ? evhttp_connection_get_bufferevent(evcon) : NULL);
 	}
@@ -2666,6 +3152,20 @@ static void fpm_http_request(struct evhttp_request *req, void *arg)
 		evhttp_send_error(req, 403, "Forbidden");
 		fpm_http_count_local(gw);	/* #390: answered here, not forwarded */
 		return;
+	}
+
+	/* An absolute-form authority too long for the FPM_HTTP_AUTHORITY_MAX buffer would be
+	 * silently replaced by the Host header in some places and not in others
+	 * (#534): refuse it up front. */
+	{
+		char authority[FPM_HTTP_AUTHORITY_MAX];
+
+		if (fpm_http_absolute_authority(evhttp_request_get_uri(req), authority, sizeof(authority)) < 0) {
+			fpm_http_log_response(gw, req, peer_addr, NULL, 400, 0, NULL);
+			evhttp_send_error(req, HTTP_BADREQUEST, "Bad Request");
+			fpm_http_count_local(gw);
+			return;
+		}
 	}
 
 	/* Resolved once per request: whether the direct peer is a trusted proxy
@@ -2958,7 +3458,7 @@ static void fpm_http_read_deadline_arm(struct fpm_http_gateway_s *gw, struct buf
 	struct fpm_http_read_deadline_s *dl = calloc(1, sizeof(*dl));
 
 	if (!dl) {
-		return; /* OOM: degrade to libevent's idle timeout only, the listener still works */
+		return; /* OOM: this connection gets no read deadline (libevent has no implicit one, issue #593); the listener still works */
 	}
 	dl->gw = gw;
 	dl->bev = bev;
@@ -3047,6 +3547,21 @@ static struct bufferevent *fpm_http_bevcb(struct event_base *base, void *arg)
 	{
 		bev = bufferevent_socket_new(base, -1, BEV_OPT_CLOSE_ON_FREE);
 	}
+	if (bev && gw->read_timeout_ms > 0) {
+		fpm_http_read_deadline_arm(gw, bev);
+	}
+	return bev;
+}
+
+/* The bevcb of the http.plain_listen listener: always a plain bufferevent,
+ * never the TLS wrapper fpm_http_bevcb() applies when gw->tls_ctx is set --
+ * this is the cleartext port. It arms the same first-request read deadline;
+ * without one a client could connect and send nothing, forever (issue #593). */
+static struct bufferevent *fpm_http_plain_bevcb(struct event_base *base, void *arg)
+{
+	struct fpm_http_gateway_s *gw = arg;
+	struct bufferevent *bev = bufferevent_socket_new(base, -1, BEV_OPT_CLOSE_ON_FREE);
+
 	if (bev && gw->read_timeout_ms > 0) {
 		fpm_http_read_deadline_arm(gw, bev);
 	}
@@ -3402,6 +3917,7 @@ static void fpm_http_gateway_run(struct fpm_http_gateway_s *gw, unsigned index) 
 		 * unauthenticated listener, and it answers before TLS, so leaving it
 		 * at EV_SIZE_MAX would leave the hole open on the easier port. */
 		evhttp_set_max_headers_size(plain, FPM_HTTP_HEADERS_MAX);
+		evhttp_set_bevcb(plain, fpm_http_plain_bevcb, gw);
 		evhttp_set_gencb(plain, fpm_http_plain_request, gw);
 		evutil_make_socket_nonblocking(gw->plain_listen_fd);
 		if (evhttp_accept_socket(plain, gw->plain_listen_fd) != 0) {
@@ -4419,6 +4935,12 @@ static void fpm_http_gateway_settings(struct fpm_worker_pool_s *wp, struct fpm_h
 	gw->read_timeout_ms = wp->config->http_read_timeout;
 	gw->read_timeout.tv_sec = wp->config->http_read_timeout / 1000;
 	gw->read_timeout.tv_usec = (wp->config->http_read_timeout % 1000) * 1000;
+	gw->keepalive_timeout_ms = wp->config->http_keepalive_timeout;
+	gw->keepalive_timeout.tv_sec = wp->config->http_keepalive_timeout / 1000;
+	gw->keepalive_timeout.tv_usec = (wp->config->http_keepalive_timeout % 1000) * 1000;
+	gw->write_timeout_ms = wp->config->http_write_timeout;
+	gw->write_timeout.tv_sec = wp->config->http_write_timeout / 1000;
+	gw->write_timeout.tv_usec = (wp->config->http_write_timeout % 1000) * 1000;
 	gw->max_body = wp->config->http_max_body;
 
 	gw->wait_policy = wp->config->http_pool_full_policy;
@@ -5005,6 +5527,14 @@ int fpm_http_validate_pool(struct fpm_worker_pool_s *wp) /* {{{ */
 	}
 	if (wp->config->http_read_timeout < 0) {
 		zlog(ZLOG_ERROR, "[pool %s] http.read_timeout must not be negative", wp->config->name);
+		return -1;
+	}
+	if (wp->config->http_keepalive_timeout < 0) {
+		zlog(ZLOG_ERROR, "[pool %s] http.keepalive_timeout must not be negative", wp->config->name);
+		return -1;
+	}
+	if (wp->config->http_write_timeout < 0) {
+		zlog(ZLOG_ERROR, "[pool %s] http.write_timeout must not be negative", wp->config->name);
 		return -1;
 	}
 	/* issue #340. Deliberately here and not in fpm_http_routes_build(): the

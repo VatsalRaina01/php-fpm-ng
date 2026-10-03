@@ -84,6 +84,11 @@ static const char *const fpm_pool_gateway_rejects[] = {
 	"process.dumpable",
 	/* AppArmor confines a PHP child; the gateway process is not confined. */
 	"apparmor_hat",
+	/* Issue #593: the gateway has no connection cap. Both are read only by the
+	 * http-direct code (fpm_http_direct.c), so accepting them here would leave
+	 * an operator believing the public port is limited while it is not. */
+	"http.max_connections",
+	"http.max_connections_per_client",
 	"fiber.",
 	"worker.",
 	NULL
@@ -313,7 +318,8 @@ static const struct fpm_pool_executor_s fpm_http_direct_executors[] = {
  * left, its only content was the capability bit that selected the optimized
  * transport, measured at 9.5 us per request
  * (docs/FASTCGI_NG_OPTIMIZATION.md) -- a footnote to "http", which set the
- * same bit. Issue #388 retired "http" itself: it was two
+ * same bit. The transport patches were dropped in issue #589, so no pool
+ * type reaches an optimized path. Issue #388 retired "http" itself: it was two
  * things in one section (a pool of PHP workers and the proxy in front of them)
  * and the proxy is now the type it always should have been. Both names are
  * kept as retired names below. */
@@ -335,6 +341,16 @@ static const struct fpm_pool_type_s fpm_pool_types[] = {
 		.requires_listen = 1,
 		.requires_pm     = 1,
 		.serves_requests = 1,
+		/* Issue #590. Upstream main/fastcgi.c assigns req->tcp only under
+		 * _WIN32, so its own "TCP_NODELAY on a FCGI_KEEP_CONN connection"
+		 * branch never runs and a response over the 8 KiB output buffer waits
+		 * for the peer's delayed ACK (41 ms median per request measured with a
+		 * keep-alive client; fpmng-fastcgi-tcp-nodelay.phpt). The gateway holds
+		 * persistent TCP connections to a pool, so this is the common case, not
+		 * an edge. Set on the listener, where accepted sockets inherit it on
+		 * Linux; it replaces the php-src patch that used to do this in
+		 * main/fastcgi.c. A unix listener is left alone. */
+		.listening_socket_nodelay = 1,
 		.baseline_counter = "requests",
 		.operator_endpoint = 1,
 		.rejects         = fpm_pool_fastcgi_rejects,
@@ -630,8 +646,7 @@ static const struct {
 	  "set 'operator.status_path' and 'operator.metrics_path' on the pool you want to watch "
 	  "(issue #278); one endpoint per pool replaced the pool that aggregated all of them" },
 	{ "fastcgi-ng",
-	  "it was removed in 0.9.0 (issue #376): the optimized transport it selected lives on under "
-	  "pool.type = fastcgi; use pool.type = fastcgi, or pool.type = http-direct for a pool with "
+	  "it was removed in 0.9.0 (issue #376); use pool.type = fastcgi, or pool.type = http-direct for a pool with "
 	  "no web server in front" },
 	{ "http",
 	  "it was split in two (issue #388): a pool of PHP workers is 'pool.type = fastcgi' and the "

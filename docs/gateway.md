@@ -79,6 +79,22 @@ is honest for a type called `gateway`. Two are new:
 | `http.operator` | Serve every exposed pool's operator pages through this public port. | `no` |
 | `http.operator_allowed_clients` | Who may reach them. Separate from `http.allowed_clients`. | -- (required when `http.operator = yes`) |
 
+Client-side limits (issue #593). A gateway process serves every connection of
+its pool, so a client that holds a socket open holds a file descriptor for all of
+them:
+
+| Directive | Meaning | Default |
+| --- | --- | --- |
+| `http.read_timeout` | Budget in ms for reading one whole request (headers and body). The first request from accept; every later request on the connection from its first byte. `0` = off. | `5000` |
+| `http.keepalive_timeout` | How long in ms an idle keep-alive connection may wait for its next request. `0` = unlimited. | `60000` |
+| `http.write_timeout` | How long in ms a client may make no progress on a pending response before the connection is closed. `0` = unlimited. | `30000` |
+
+`http.plain_listen` has the first-request deadline and the keep-alive limit too.
+`http.idle_timeout` is **not** a client timeout: it is the upstream-side timer.
+`http.max_connections` and `http.max_connections_per_client` are not supported
+on a gateway yet and are refused by `php-fpm-ng -t`.
+`http.keepalive_timeout` and `http.write_timeout` are refused on `http-direct`.
+
 `http.operator*` stays in `http.`, on purpose: it does not configure the
 operator listener, it configures what the gateway does with its own port.
 
@@ -160,6 +176,11 @@ explicit collision is still a startup error, as for any pool. An explicit
 `operator.status = off` / `operator.metrics = off` is honoured too and
 suppresses only the default.
 
+Sharing the default is limited to one master. A second **master** on the same
+host cannot bind `127.0.0.1:9253` again and fails to start; give it its own
+`operator.*_listen` or turn its pages off (see "Two masters on one host" in
+`operator-endpoint.md`, issue #561).
+
 Two gateways with `http.operator = yes` expose the same set of pools, each
 under its own base. To keep one gateway out of it, turn its `http.operator` off
 or empty its base paths. To keep one *pool* out of it, do not expose the pool.
@@ -177,6 +198,49 @@ The operator listener speaks HTTP/1.1, so the forwarding uses the same client
 transport #344 adds for `http-direct` targets. One transport, two uses: a
 target pool's request listener, and the operator listener. Nothing new is
 invented for it.
+
+## Absolute-form request targets
+
+RFC 9112 3.2.2 obliges a server to accept `GET http://host/path HTTP/1.1`. The
+gateway reduces such a target to origin-form (`/path`, or `/` when empty) once
+and uses that for `ping.path`, the operator namespace and its ACL,
+`access.suppress_path[]`, the plain-HTTP redirect and both transports; the
+authority (without userinfo) replaces the `Host` header, so `HTTP_HOST`,
+`SERVER_NAME` and the `Host` sent to an `http.route[]` target agree (#534).
+Routing and static lookups already used the parsed path. `http:/path` is read the same way, and the forwarded target (`REQUEST_URI`,
+the request line to an `http.route[]` target, the redirect `Location`) is built
+from that same parse. A target that starts with `/` is always origin-form: `//api/users` is the path
+`//api/users`, not host `api` plus `/users`. An authority longer than 261 bytes is answered 400.
+
+## The upstream's `Status:` header
+
+The gateway turns the upstream's CGI `Status:` header into the HTTP status line.
+Only `NNN` or `NNN reason` with a final status (200..599) is accepted, the same
+range `http-direct` uses. Anything else (`abc`, `-5`, `99999`, a 1xx, an empty
+value) makes the gateway answer `502 Bad Gateway`, log a WARNING
+(`upstream sent invalid Status`), record 502 in the access log and drop the rest
+of the upstream reply (#594).
+
+## An upstream that fails after the response head
+
+Once the status line and headers are on the wire the gateway can no longer
+answer 502. If the upstream then dies or breaks its framing (a FastCGI
+connection closed without `END_REQUEST`, an HTTP target closed before the
+chunked terminator or the full `Content-Length`), the gateway logs a WARNING
+(`failed after the response head was sent`), writes the access-log line with the
+status already sent, and closes the client connection **without** the
+terminating chunk. The client sees an incomplete message instead of a complete
+one, and a cache in front does not store the truncated body. A body that is
+delimited by the upstream closing its connection ends normally. An HTTP/1.0
+client gets a close-delimited reply, which no close can mark as incomplete
+(#533).
+
+## Upstream status counters on keep-alive
+
+The gateway always sends `FCGI_KEEP_CONN`, so a `fastcgi` upstream hits the
+upstream FPM keep-alive counting bug (php/php-src#18956): `max active processes`
+reads too high and `idle`/`active` can lag by up to one heartbeat. See
+[operator-endpoint.md](operator-endpoint.md#known-upstream-bug-keep-alive-counters-phpphp-src18956).
 
 ## The gateway's own numbers
 

@@ -292,6 +292,12 @@ struct fpm_http_target_s {
 	TAILQ_HEAD(, _fpm_http_upstream) upstreams;
 	unsigned nupstreams;
 	TAILQ_HEAD(, _fpm_http_conn) waiting;	/* requests without a free connection yet */
+	/* Why the last ops->connect() returned NULL: 0 = no budget or a transient
+	 * failure (the pool is full), else the errno of the socket()/connect()
+	 * that failed because the target's socket is gone, refused or not
+	 * accessible (see fpm_http_connect_errno_unreachable()). Reset by the caller
+	 * before each attempt; written only by the transports' connect(). */
+	int connect_errno;
 };
 
 /* One row of the routing table: a path prefix and the target it selects. The
@@ -346,6 +352,15 @@ struct fpm_http_client_s {
 	struct fpm_http_client_s *hash_prev;
 	struct fpm_http_client_s *hash_next;
 	size_t hash_bucket;
+	/* Issue #593: the deadline for the NEXT request on a keep-alive connection.
+	 * ka_timer is armed when a response completes (http.keepalive_timeout) and
+	 * stopped when the next request is dispatched; ka_watch is a one-shot
+	 * EV_READ on the fd that sees the first byte of that next request and
+	 * swaps the timer for http.read_timeout. Both belong to the node, not to
+	 * a bufferevent reference: fpm_http_client_closed() frees them before the
+	 * connection (and its fd) goes. */
+	struct event *ka_timer;
+	struct event *ka_watch;
 };
 
 /* Process-local open-connection index, copied empty into each gateway child by
@@ -385,6 +400,10 @@ struct fpm_http_gateway_s {
 	struct timeval idle_timeout;			/* idle_ms split into {sec, usec} for event_add() */
 	int read_timeout_ms;				/* http.read_timeout, milliseconds; 0 = no client-side read deadline */
 	struct timeval read_timeout;			/* read_timeout_ms split into {sec, usec} for evhttp_set_timeout_tv() */
+	int keepalive_timeout_ms;			/* http.keepalive_timeout, milliseconds; 0 = idle keep-alive connections are never cut */
+	struct timeval keepalive_timeout;		/* keepalive_timeout_ms split into {sec, usec} */
+	int write_timeout_ms;				/* http.write_timeout, milliseconds; 0 = a stalled client write is never cut */
+	struct timeval write_timeout;			/* write_timeout_ms split into {sec, usec} for bufferevent_set_timeouts() */
 	/* http.pool_full_policy, issue #309. wait_policy is FPM_HTTP_POOL_FULL_REJECT
 	 * (the default, unchanged behavior: fpm_http_pump_once() drains gw->waiting
 	 * to a 503 the instant the budget is exhausted) or FPM_HTTP_POOL_FULL_WAIT,
@@ -585,9 +604,11 @@ struct fpm_http_gateway_s {
  * there is no complete request to answer to.
  *
  * Keep-alive: the deadline covers the first request on a connection. Later
- * requests on the same connection are a deliberate gap (arming a new one
- * would need a request-start hook libevent does not offer); the per-read
- * idle timeout still applies to them.
+ * requests are bounded by http.keepalive_timeout and, from their first byte,
+ * http.read_timeout again -- the timers on struct fpm_http_client_s (issue
+ * #593). They are not built on this node: a node holds a bufferevent
+ * reference, and a reference kept past the close of a keep-alive connection
+ * would delay its EOF for the whole timeout.
  *
  * The gw->deadlines list exists only so fpm_http_request() can find and
  * disarm its own deadline by bufferevent pointer: one linear scan per
@@ -662,6 +683,7 @@ struct _fpm_http_conn {
 
 	smart_str cgi_headers;				/* CGI header block until it is complete */
 	int headers_sent;
+	int discard_upstream;				/* issue #594: invalid upstream Status, 502 sent, drop the rest of the reply */
 
 	char peer_addr[FPM_HTTP_FORWARDED_ADDR_LEN];		/* direct TCP peer, before X-Forwarded-For */
 	ev_uint16_t peer_port;
@@ -766,6 +788,15 @@ void fpm_http_stdout(fpm_http_conn *c, const char *data, size_t len);
 void fpm_http_finish(fpm_http_conn *c, int explained);
 fpm_http_upstream *fpm_http_transport_connect(struct fpm_http_target_s *t);
 const char *fpm_http_method_name(enum evhttp_cmd_type type);
+/* Origin-form target (path and ?query) of `req`, from libevent's one parse (#534). */
+void fpm_http_origin_form(smart_str *out, struct evhttp_request *req);
+/* Buffer size for fpm_http_absolute_authority(): a 253-byte DNS name, ":65535" (6 bytes)
+ * and the NUL, rounded up (a longer authority is answered 400). */
+#define FPM_HTTP_AUTHORITY_MAX 262
+/* Copies the absolute-form authority of `uri` into `buf`: 1 = copied, 0 = `uri` is not
+ * absolute-form or the authority is empty (the Host header stays), -1 = it does not fit
+ * (the callers answer 400). */
+int fpm_http_absolute_authority(const char *uri, char *buf, size_t buf_len);
 /* Issue #344: the HTTP/1.1 client transport's vtable, defined in
  * fpm_http_client.c. A function, not an extern const, so the definition can
  * stay static to its file and the header stays linkage-free. */

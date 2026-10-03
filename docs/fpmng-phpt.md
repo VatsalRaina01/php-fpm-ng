@@ -15,11 +15,30 @@ task file).
 
 ## Prerequisites
 
-Same as [`fpm-phpt.md`](fpm-phpt.md): a prepared php-src tree, matching patch
-stack, built `php-fpm-ng` and CLI `php` from that tree, `strings`, and a
-SHA-256 tool. The fiber isolation and fiber matrix tests require a binary
-configured with `--enable-fpmng-fiber`; without it they skip cleanly via
-`--SKIPIF--`.
+Same as [`fpm-phpt.md`](fpm-phpt.md): a `php-fpm-ng` binary, a CLI `php`,
+`strings`, and a SHA-256 tool. No php-src checkout is needed (see below); a
+prepared one is still accepted.
+
+## Run without a php-src checkout
+
+Give `-` in place of the source tree (issue #423):
+
+```sh
+TEST_PHP_EXECUTABLE=/usr/bin/php8.5 \
+TEST_PHP_FPM_EXECUTABLE=/usr/sbin/php-fpm-ng \
+TEST_FPM_TIMEOUT=120 \
+"$REPO/build/run-fpmng-phpt.sh" - /path/to/dedicated/fpmng-phpt-results
+```
+
+The tree is assembled by `build/phpt-tree.sh` from `third_party/php-src/`,
+`sapi/fpmng/tests/` and `sapi/fpmng/acme/`, and removed when the run ends. It
+carries `run-tests.php`, upstream's harness (`tester.inc` and friends) and
+`browscap.ini` (our own minimal fixture, `sapi/fpmng/fixtures/browscap.ini`), which is what the suite reads outside this repository.
+Tests that run checked-in examples find them through the repository the runner
+sits in (`FPMNG_TEST_REPO_ROOT`), so run the script from a checkout of this
+repository. `build/ci-package-gate.sh` stages the same tree for its install
+stage. See the section of the same name in [`fpm-phpt.md`](fpm-phpt.md) for how
+the runner makes sure the binary it was given is the one that gets tested.
 
 ## Run only the fpmng-owned suite
 
@@ -84,10 +103,51 @@ Categories are the same strict mapping documented in `fpm-phpt.md`.
 `slow.tsv` is ours: two columns, seconds and test file, longest first, for every
 test above `TEST_FPM_SHOW_SLOW_MS` (default 1000; `0` turns the table off). The
 same table is echoed to stderr at the end of the run, so the CI log shows where
-the time went without downloading the artifact. The suite is serial -- no `-j`,
-because upstream's `Tester::getPort()` bases every instance at the same port
-(issue #394) -- so its wall clock is the sum of its tests, and this is the one
-number that tells you which ones to look at.
+the time went without downloading the artifact. Each test is timed on its own,
+so under `-j` the table still ranks tests by what they cost, but their sum is no
+longer the wall clock.
+
+## Parallel runs
+
+The suite runs with `run-tests.php -j<N>` (issue #394). `TEST_FPM_JOBS` sets the
+worker count; the default is the number of CPUs, at most 8, and `1` is a serial
+run with no `-j` at all. The tests spend their time waiting on a master they
+started, so they cost wall clock rather than CPU, which is why `-j` pays.
+
+Running tests side by side on one host needed four things, and
+`build/phpt-parallel.sh` does the first three on the throwaway tree before every
+run (the pinned copy under `third_party/php-src/` stays untouched, see
+`build/phpt-fixture-patches/README.md`):
+
+- **Port blocks per worker.** Upstream's `Tester::getPort()` starts every test
+  at 9008, so two workers bound the same port. `run-tests.php` now passes each
+  worker's number to its tests as `TEST_PHP_WORKER`, and the Tester moves its
+  base by 200 per worker. Unset (a serial run) the ports are the old 9008,
+  9009, .... Our tests that pick a fixed port of their own (`28054` and its
+  neighbours, from `FPMNG_DIRECT_*_PORT`) add `200 * TEST_PHP_WORKER` the same
+  way.
+- **No directory-wide CONFLICTS.** Upstream ships `sapi/fpm/tests/CONFLICTS`
+  with the word `all`, which makes `run-tests.php` run every test of the
+  directory one after another at the end. It is removed from the tree.
+- **One key for the gateway tests.** A `pool.type = gateway` binds the operator
+  listener's default address, `127.0.0.1:9253`, whatever port the test gave it.
+  Two masters cannot both hold it, so the tests that start a gateway get a
+  `--CONFLICTS-- operator-default-listener` section and never run together.
+  A new gateway test that reaches the default listener only through an include
+  needs the section by hand if the script does not recognise it.
+- **Own names.** Temporary directories and sockets a test creates are named for
+  that test (`fpmng-sup-restart-<pid>`, not `fpmng-sup-<pid>`): a CLEAN section
+  that globs a shared prefix deletes the directory of a test running next to it.
+
+What a collision looks like: a test that ran fine on its own fails with
+`ERROR: unable to bind listening socket for address '127.0.0.1:<port>': Address
+already in use (98)` in its log, followed by `FPM initialization failed` and a
+`NOTICE does not match expected message` from the Tester. Look for the port in
+the other tests' configuration, or for a test that kept a master alive after
+its own failure. Note that `run-tests.php` retries a test once when its output
+says `address already in use` or when the test calls `usleep`/`sleep`, and
+reports it as `WARN ... passed on retry attempt`: a port collision that heals
+itself shows up as a WARN, not a FAIL, so a growing WARN count is the signal.
 
 `summary.txt` carries `min_pass_check`, and a full run fails when fewer than
 **half** the selected tests passed. The trap being defended is a run that skips
@@ -116,7 +176,7 @@ schedule's *next* occurrence has passed, which is one tick plus a further minute
 Five tests were spending well over a hundred seconds of the suite's wall clock
 this way.
 
-A binary configured with `--enable-fpmng-debug-clock` honours
+A binary built with `FPMNG_DEBUG_CLOCK=1` (`build/libphp-build.sh`) honours
 `FPMNG_DEBUG_CLOCK_RATE`, an integer from 1 to 600, and runs **both**
 `CLOCK_REALTIME` and `CLOCK_MONOTONIC` -- and the blocking waits derived from
 them -- that many times faster. The anchor is taken once in `fpm_init()`, before
@@ -125,7 +185,7 @@ anything forks, so the master and every child agree. Issue #396;
 constant time offset cannot work and why `libfaketime` was rejected.
 
 ```sh
-./configure --enable-fpmng --enable-fpmng-debug-clock ...
+FPMNG_DEBUG_CLOCK=1 ./build/libphp-build.sh out
 ```
 
 Three rules this facility lives by:
@@ -293,6 +353,10 @@ refused. See [`fpm-phpt.md`](fpm-phpt.md#deliberate-deviations).
 ## CI
 
 The `fpmng-phpt` job in `.github/workflows/build-matrix.yml` downloads the
-canonical build artifact and runs this runner. It is the only job that runs
+canonical build artifact (built by `build/libphp-build.sh` against the
+distribution SDK, no php-src) and runs this runner with tree `-`. It is the only job that runs
 these tests: before issue #95 the `phpt` job ran them a second time, because
 that runner swept the whole copied test directory.
+
+An explicit `FPMNG_*_PORT` environment variable replaces the per-worker offset
+of that test's fixed port, so do not set one for a run with more than one job.

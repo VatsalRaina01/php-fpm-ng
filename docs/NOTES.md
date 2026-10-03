@@ -219,6 +219,24 @@ framework compatibility.
 
 - #428 prepares PHP/FPM configuration bootstrap and verifies embedded configuration
   plus host override policy without changing ordinary file-based startup.
+- #428 result (2026-10-01). **fpm.conf:** the parser now takes text, not a
+  path (`fpm_conf_load_ini_buffer()` in `sapi/fpmng/fpm/fpm_conf.c`); a file is
+  read into memory and parsed through it, and `-y fd:N -t` feeds it the bytes of
+  an open descriptor as the test driver (`fpmng-config-input-descriptor.phpt`).
+  Diagnostics print the input's logical name (`[fd:3:6] ...`), and an input that
+  is not a file refuses `include=` instead of resolving it against the working
+  directory. `-y -` cannot be the driver: `fpm_stdio_init_main()` replaces fd 0
+  with `/dev/null` before the configuration is read. The embedded loader calls
+  the same function with its own name and the payload bytes. **php.ini:** no new
+  code. PHP reads the SAPI `ini_entries` (`-d`) and honours `php_ini_ignore`
+  (`-n`) inside `php_module_startup()`, before module startup, and `fpm.conf` is
+  read after it (`fpm_init()`), so an embedded php.ini handed over as
+  `ini_entries` + `php_ini_ignore` is a startup input already.
+  `fpmng-ini-bootstrap-policy.phpt` pins the current `-n/-c/-d/-y`,
+  `PHP_INI_SCAN_DIR` and `fpm.config` behaviour; two cases are recorded as
+  CURRENT because they are host-dependent and the packed executable must decide
+  about them: `-c` still merges the host's `PHP_INI_SCAN_DIR`, and `-c` naming a
+  missing file is silent.
 - #429 owns safe, generic packing of the three mandatory files without
   executing the PHAR stub.
 - #430 owns extraction/materialization lifecycle, content-addressed identity,
@@ -367,9 +385,14 @@ reach those files. This is the first real limitation of the model.
 
 **And it is not a theoretical problem; it is our own problem.** The gateway
 keeps persistent connections to the pool (`FCGI_KEEP_CONN`), so fpm-ng is exactly
-the case broken by this bug: the idle-versus-active counter lies, and
-`pm = dynamic` and `ondemand` scale the pool incorrectly. Without the patch,
-only `pm = static` is trustworthy.
+the case broken by this bug: the idle-versus-active counter lies. (Corrected
+2026-10-03, issue #591: pm scaling is not affected, because the maintenance loop
+recounts idle and active from `request_stage` every heartbeat. What stays wrong is
+`max active processes` and, for up to one heartbeat, `idle`/`active`.
+Patch 0001 was dropped from `main` by issue #591; `patches/README.md` has the audit.)
+
+(Historic, 2026-10-03, issue #592: the last patch is gone and `prepare.sh` no
+longer has a patch step; the decision below describes the state until then.)
 
 Decision: **carry the patch**, but make the deviation visible and measurable.
 `patches/` + `prepare.sh` applies it and reports it loudly; without patches it
@@ -2364,6 +2387,9 @@ afterwards (the same trap as in 3o). The directive is per pool.
 
 ### Traps found along the way
 
+(Historic, issue #592: traps 1-4 concern the patch stack, which `main` no longer
+has; `prepare.sh` lost its stack logic with it.)
+
 1. **`0001` broke `--enable-fpm` in the same tree — FIXED (path 1).** It changed
    the hook signatures in `main/fastcgi.h` (`void(*)(bool)`), while upstream
    `fpm_main.c` passed `void(*)(void)`; GCC 14+ treats incompatible pointers as
@@ -2961,7 +2987,7 @@ upstream changed something.
 
 ## 9. Formal matters
 
-- **License**: the code comes from FPM → PHP License 3.01. There is no choice.
+- **License**: the code that comes from FPM stays under the PHP License 3.01. Our own code is MIT (see `LICENSE`).
 - **Name**: "PHP" is a trademark of the PHP Group, which has a usage policy.
   `php-fpm-ng` as a product name invites a letter asking us to change it. It can
   remain provisional; choose something of our own before publication.

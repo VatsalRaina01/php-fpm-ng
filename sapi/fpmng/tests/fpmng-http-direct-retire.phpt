@@ -28,7 +28,7 @@ if (isset($_GET['sleep'])) {
 }
 echo getmypid();
 PHP);
-$base = (int) (getenv('FPMNG_DIRECT_TEST_PORT') ?: 28054);
+$base = (int) (getenv('FPMNG_DIRECT_TEST_PORT') ?: 28054 + 200 * (int) getenv('TEST_PHP_WORKER'));
 $port = $base + 31;
 $solo = $base + 32;
 /* The status pages of both pools, on one operator listener (issue #275): the
@@ -262,6 +262,7 @@ try {
     $reader = connect($solo);
     [$status, $pid] = fetch($reader, '/');
     verify($status === 200, "solo pool: $status");
+    verify((int) $pid > 1, "solo pool: no usable pid in '$pid'");
     $tester->signal('USR1', (int) $pid);
     $tester->signal('USR1', (int) $pid);
     /* A request the retiring child does answer, on the connection it is
