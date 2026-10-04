@@ -66,7 +66,8 @@ release workflow is its own and not the shared one from `crazy-goat/.github`. It
 
 1. builds, installs into a clean container and tests the `.deb` and the `.apk`, with and
    without TLS and ACME, through `build/ci-package-gate.sh`. The four cells run in parallel
-   (matrix job `packages`, `fail-fast: false`) and each uploads its output as an artifact;
+   (matrix job `packages`, `fail-fast: false`) and each uploads its output as an artifact; a
+   cell that failed uploads the failing `.phpt` diffs instead, as `phpt-failure-<cell>`;
 2. in the `release` job, which needs all four cells, collects the assets: `php-fpm-ng_<tag>_php<minor>_<arch>.deb`,
    `php-fpm-ng-<tag>-php<minor>-<arch>.apk`, the same two for `php-fpm-ng-tls`, and
    `SHA256SUMS`. The packages are unsigned on purpose (issue #223);
@@ -90,6 +91,28 @@ gh release view vX.Y.Z
 ```
 
 ### A failed release run
+
+A red `packages` cell says where its evidence is. `run-tests.php` writes a `.diff`, a `.out`,
+an `.exp` and a `.log` next to every failing `.phpt`; the gate leaves the tree it ran in
+behind (staged under `work/prepared`), and the workflow uploads those files as
+`phpt-failure-<cell>` — `if: failure()`, `retention-days: 3`, `if-no-files-found: warn`. Take
+it from the run's Artifacts list. A cell that passed uploads nothing (issue #669).
+
+Three days is the interval of the failure this is for: #527 was opened on 2026-09-30 and
+fixed on 2026-10-03, with the flake chased in between, so evidence kept for less than that
+expires before the investigation ends.
+
+Look for it in the tree, not in `results/`. The runners' own `failed-artifacts/` directory is
+a different thing and is never created for the gate: `build/run-fpmng-phpt.sh` only copies
+out of a tree it assembled itself, the `-` form, which is what `build-matrix.yml` uses
+(`build/run-fpmng-phpt.sh:126`). Issue #527 could not be reproduced because nobody could find
+any of this — that gate uploaded no cell output at all; the `package-<cell>` artifact arrived
+later, with the parallel matrix of #677 — and the failure message named a file that was not
+downloadable either.
+
+Note also that `package-<cell>` is uploaded only when the cell passed — a step with no `if:`
+gets the default `success()` — so a failing cell has no package artifact, and the `release`
+job, which needs all four, does not run. Re-run everything to rebuild and re-gate.
 
 The `release` job can be re-run on its own (the re-run button next to the job, or
 `gh run rerun --job JOB_ID`), and doing that is safe: a draft release left behind by an
