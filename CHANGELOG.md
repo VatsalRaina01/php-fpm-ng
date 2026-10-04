@@ -13,6 +13,14 @@ release and no entry of their own: they are folded into the next entry (v0.5.2 a
 
 ## [Unreleased]
 
+### Added
+
+- New fiber test `fpmng-fiber-statics-reference.phpt`, and the manual script it replaces, `tests/statics_reference.php`, is gone. It is the regression test for the hazard that script reproduced: a request that takes a reference to a `fiber.isolate_statics` typed static before its first suspension, with a second request touching the same slot while the first is away — it checks that the reference and the static still see each other's writes after resuming, and that each request's own sequence is unperturbed by the other. The suspension is `usleep()`, which the sleep interception turns into a real fiber switch, so the test needs no MySQL, unlike the script. Listed in `build/assert-fiber-tests-ran.sh`, so a `--SKIPIF--` guard that starts matching makes the fiber CI cell red instead of leaving this untested (#624).
+
+### Removed
+
+- Dead code on branch `async`, none of it built or reachable: the unbuilt "files_arb" session-lock variant (`sapi/fpmng/fpm/fpm_pool_coop_session_lock.c.notbuilt` and its orphan `fpm_pool_coop_session_lock.h`, which nothing included — `docs/session-lock-arbiter-report.md` stays as the record of that variant and of why the shipped one is the field-patch), `fpm_pool_fiber_validate()` (the fiber pool type's `validate` slot is `fpm_pool_type_coop_fiber_validate()`, which calls `fpm_coop_validate()` itself) and `fpm_coop_reval_enabled()` (#624).
+
 ### Changed
 
 - `bin/worktree.sh` takes `--base <branch>` (or `--base=<branch>`) and creates the worktree from `origin/<branch>` instead of the repository's default branch, which stays the default when the option is absent. It is for work that belongs to a long-lived line the default branch has no trace of: a fiber or coop issue here needs `--base async`, because `main` carries no fiber or coop source, no fiber/coop test and no `async-fiber.yml`. The base is looked up on the remote before the worktree exists, so a mistyped branch ends in `base branch does not exist on origin: <name>` instead of a `git worktree add` reference error, and a remote that cannot be reached says so instead of blaming the branch name. The fetch names its destination ref explicitly, so `--base` also works in a clone whose `remote.origin.fetch` is narrowed (`git clone --single-branch`), and a base git would not accept as a branch name (a glob, a space) is refused before anything is created. New `build/test-worktree-base.sh`, a step of the `fiber-hermetic` job in `async-fiber.yml`, drives the real script against a throwaway remote and covers the default base, `--base <branch>`, a base that is not on the remote, a glob base, a clone with a narrowed refspec and an unreachable remote (#709).
