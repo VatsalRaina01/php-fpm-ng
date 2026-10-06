@@ -207,10 +207,18 @@ shape and stripped on the re-exec, which rebuilds them from the new payload; no
 environment variable is involved, and any other arguments are never touched; replacing the executable with an unpacked `php-fpm-ng` makes the
 re-exec run as a plain binary. `fpmng-pack-run.phpt` covers this.
 
-OPcache note: it does not cache the entries of a PHAR that is only read by
-`phar://` (measured, `num_cached_scripts` stays 0 with these pools), so the
-upgrade cannot serve stale code from it; the isolation that remains is the path
-(`__FILE__` of two payloads differs in the digest directory).
+OPcache note: OPcache caches the entries of the PHAR read through `phar://`
+(`fpmng-pack-run.phpt` checks `num_cached_scripts > 0`), keyed by the digest
+path, so a repack plus SIGUSR2 never serves the old payload's scripts: the new
+state directory gives new keys, and timestamp validation covers the rest. One
+condition: OPcache silently skips a script whose modification time is 0
+(`ext/opcache/ZendAccelerator.c`, the timestamp check in PHP 8.5), and a PHAR
+entry stored with mtime 0 reports exactly that. Such a PHAR still runs, but its
+scripts are not cached. Setting `opcache.validate_timestamps=0` alone does not
+help, because the default `opcache.file_update_protection=2` triggers the same
+skip. Build the PHAR so that its entries carry a real mtime. Measured: the
+hand-written test fixture wrote mtime 0; other tools that normalize timestamps
+may do the same (not measured).
 
 ## Appending your own
 
