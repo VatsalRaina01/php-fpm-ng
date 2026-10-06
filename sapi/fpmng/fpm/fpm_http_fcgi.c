@@ -12,7 +12,6 @@
 #include <stdlib.h>
 #include <stdint.h>
 #include <string.h>
-#include <ctype.h>
 #include <stdio.h>
 #include <errno.h>
 #include <signal.h>
@@ -652,25 +651,6 @@ void fpm_http_conn_free(fpm_http_conn *c)
 	 * request. NULL for every routed request. */
 	free(c->upstream_uri_owned);
 	free(c);
-}
-
-/* Issue #594: a CGI "Status:" value is "NNN" or "NNN reason", exactly three
- * digits, and only a final status (200..599, fpm_http_direct_status_final())
- * may become the status line. atoi() turned "abc" into 0, "99999" into itself
- * and overflowed on a longer number; a 1xx went out as the *final* answer, its
- * body dropped by libevent, and the client waited for a response that never
- * came (the shape of #451). *reason points into `value`, "" when absent. */
-static bool fpm_http_parse_cgi_status(const char *value, int *code, const char **reason)
-{
-	if (!isdigit((unsigned char) value[0]) || !isdigit((unsigned char) value[1]) || !isdigit((unsigned char) value[2])) {
-		return false;
-	}
-	if (value[3] != '\0' && value[3] != ' ') {
-		return false;
-	}
-	*code = (value[0] - '0') * 100 + (value[1] - '0') * 10 + (value[2] - '0');
-	*reason = value[3] == ' ' ? value + 4 : "";
-	return fpm_http_direct_status_final(*code);
 }
 
 /* The CGI header block is complete: "Status:" becomes the status line, the rest is copied. */

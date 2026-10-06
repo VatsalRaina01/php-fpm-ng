@@ -493,6 +493,26 @@ bool fpm_http_direct_status_final(long status)
 	return status >= 200 && status <= 599;
 }
 
+/* Issue #594: a CGI "Status:" value is "NNN" or "NNN reason", exactly three
+ * digits. Only a final status (200..599, fpm_http_direct_status_final()) can
+ * become the status line. The gateway's atoi() turned "abc" into 0 and
+ * "99999" into itself and overflowed on a longer number. A 1xx became the
+ * final answer, libevent dropped its body, and the client waited for a response
+ * that never came (the shape of #451). *reason points into `value`, or ""
+ * when absent. Issue #604 shares this parser with the buffered direct path. */
+bool fpm_http_parse_cgi_status(const char *value, int *code, const char **reason)
+{
+	if (value[0] < '0' || value[0] > '9' || value[1] < '0' || value[1] > '9' || value[2] < '0' || value[2] > '9') {
+		return false;
+	}
+	if (value[3] != '\0' && value[3] != ' ') {
+		return false;
+	}
+	*code = (value[0] - '0') * 100 + (value[1] - '0') * 10 + (value[2] - '0');
+	*reason = value[3] == ' ' ? value + 4 : "";
+	return fpm_http_direct_status_final(*code);
+}
+
 /* libevent omits the framing headers for 204/205/304 but still appends a
  * supplied body, and a body on a HEAD response is unframed by definition:
  * either way those bytes would appear in front of the next keep-alive
